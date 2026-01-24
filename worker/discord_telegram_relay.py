@@ -303,10 +303,35 @@ class DiscordWatcher:
         
         try:
             await self.page.goto(channel_url)
-            await asyncio.sleep(2)  # Wait for messages to load
+            await asyncio.sleep(3)  # Wait for messages to load
             
-            # Get message elements
-            message_elements = await self.page.query_selector_all('[class*="message-"]')
+            # Try multiple selectors for Discord messages (Discord changes these frequently)
+            selectors = [
+                '[id^="chat-messages-"]',  # Message container IDs
+                '[class*="messageListItem-"]',  # Message list items
+                '[class*="message-"][class*="cozyMessage-"]',  # Cozy message format
+                '[data-list-item-id^="chat-messages-"]',  # Data attribute selector
+                'li[id^="chat-messages-"]',  # List item messages
+            ]
+            
+            message_elements = []
+            for selector in selectors:
+                elements = await self.page.query_selector_all(selector)
+                if elements:
+                    logger.info(f"Found {len(elements)} messages with selector: {selector}")
+                    message_elements = elements
+                    break
+            
+            if not message_elements:
+                # Debug: log page content to see what we have
+                logger.warning(f"No messages found with any selector in {channel_url}")
+                # Try to get the chat container for debugging
+                chat_container = await self.page.query_selector('[class*="chatContent-"]')
+                if chat_container:
+                    logger.debug("Chat container found, but no messages matched selectors")
+                else:
+                    logger.warning("Chat container not found - page may not be fully loaded")
+                return messages
             
             for element in message_elements[-20:]:  # Last 20 messages
                 try:
