@@ -303,28 +303,44 @@ class DiscordWatcher:
         
         try:
             await self.page.goto(channel_url)
-            await asyncio.sleep(3)  # Wait for messages to load
+            await asyncio.sleep(4)  # Wait for messages to load
             
             # Try multiple selectors for Discord messages (Discord changes these frequently)
             selectors = [
                 '[id^="chat-messages-"]',  # Message container IDs
-                '[class*="messageListItem-"]',  # Message list items
+                '[class*="messageListItem-"]',  # Message list items  
                 '[class*="message-"][class*="cozyMessage-"]',  # Cozy message format
                 '[data-list-item-id^="chat-messages-"]',  # Data attribute selector
                 'li[id^="chat-messages-"]',  # List item messages
+                '[class*="messageListItem"]',  # Without hyphen
+                'ol[class*="scrollerInner-"] > li',  # Chat scroller list items
+                '[class*="scrollerInner-"] li[class*="messageListItem"]',  # Nested in scroller
             ]
             
             message_elements = []
             for selector in selectors:
-                elements = await self.page.query_selector_all(selector)
-                if elements:
-                    logger.info(f"Found {len(elements)} messages with selector: {selector}")
-                    message_elements = elements
-                    break
+                try:
+                    elements = await self.page.query_selector_all(selector)
+                    if elements:
+                        logger.info(f"Found {len(elements)} messages with selector: {selector}")
+                        message_elements = elements
+                        break
+                except Exception as e:
+                    logger.debug(f"Selector {selector} failed: {e}")
+                    continue
             
             if not message_elements:
-                # Debug: log page content to see what we have
+                # Debug: save page HTML to file for analysis
                 logger.warning(f"No messages found with any selector in {channel_url}")
+                try:
+                    html = await self.page.content()
+                    debug_file = f"debug_page_{channel_url.split('/')[-1]}.html"
+                    with open(debug_file, 'w', encoding='utf-8') as f:
+                        f.write(html)
+                    logger.info(f"Saved debug HTML to {debug_file} - check for actual selectors")
+                except Exception as e:
+                    logger.debug(f"Could not save debug HTML: {e}")
+                
                 # Try to get the chat container for debugging
                 chat_container = await self.page.query_selector('[class*="chatContent-"]')
                 if chat_container:
