@@ -10,6 +10,7 @@ export interface DiscordChannel {
   telegramTopicId?: string;
   telegramTopicName?: string;
   lastMessageAt?: Date;
+  lastMessageFingerprint?: string;
   messageCount: number;
   status: 'active' | 'degraded' | 'error';
 }

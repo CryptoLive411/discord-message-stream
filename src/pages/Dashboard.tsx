@@ -3,10 +3,14 @@ import { StatCard } from '@/components/dashboard/StatCard';
 import { ChannelList } from '@/components/dashboard/ChannelList';
 import { LiveLogs } from '@/components/dashboard/LiveLogs';
 import { ActivityChart } from '@/components/dashboard/ActivityChart';
-import { mockChannels, mockLogs, mockStats } from '@/data/mockData';
+import { useChannels } from '@/hooks/useChannels';
+import { useLogs, useRealtimeLogs } from '@/hooks/useLogs';
+import { useStats } from '@/hooks/useStats';
+import { useConnectionStatus } from '@/hooks/useConnectionStatus';
 import { MessageSquare, Clock, Layers, AlertTriangle, Hash, ArrowRight } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Link } from 'react-router-dom';
+import { Skeleton } from '@/components/ui/skeleton';
 
 function formatUptime(ms: number): string {
   const days = Math.floor(ms / (1000 * 60 * 60 * 24));
@@ -16,7 +20,14 @@ function formatUptime(ms: number): string {
 }
 
 export default function Dashboard() {
-  const activeChannels = mockChannels.filter((c) => c.enabled && c.status === 'active').length;
+  const { data: channels = [], isLoading: channelsLoading } = useChannels();
+  const { data: initialLogs = [] } = useLogs(20);
+  const logs = useRealtimeLogs(initialLogs);
+  const { data: stats, isLoading: statsLoading } = useStats();
+  const { data: connectionStatus } = useConnectionStatus();
+
+  const activeChannels = channels.filter((c) => c.enabled && c.status === 'active').length;
+  const isOnline = connectionStatus?.discord === 'connected' && connectionStatus?.telegram === 'connected';
 
   return (
     <Layout>
@@ -30,40 +41,53 @@ export default function Dashboard() {
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <span className="status-dot status-dot-success" />
-            <span className="text-sm text-success font-medium">System Online</span>
+            <span className={`status-dot ${isOnline ? 'status-dot-success' : 'status-dot-warning'}`} />
+            <span className={`text-sm font-medium ${isOnline ? 'text-success' : 'text-warning'}`}>
+              {isOnline ? 'System Online' : 'Partially Online'}
+            </span>
           </div>
         </div>
 
         {/* Stats Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          <StatCard
-            icon={MessageSquare}
-            label="Messages (1h)"
-            value={mockStats.messagesForwardedHour}
-            subValue={`${mockStats.messagesForwardedDay} today`}
-            variant="discord"
-          />
-          <StatCard
-            icon={Hash}
-            label="Active Channels"
-            value={activeChannels}
-            subValue={`${mockChannels.length} total`}
-            variant="telegram"
-          />
-          <StatCard
-            icon={Layers}
-            label="Queue Size"
-            value={mockStats.queueSize}
-            subValue="messages pending"
-            variant="default"
-          />
-          <StatCard
-            icon={Clock}
-            label="Uptime"
-            value={formatUptime(mockStats.uptime)}
-            variant="success"
-          />
+          {statsLoading ? (
+            <>
+              <Skeleton className="h-28 rounded-xl" />
+              <Skeleton className="h-28 rounded-xl" />
+              <Skeleton className="h-28 rounded-xl" />
+              <Skeleton className="h-28 rounded-xl" />
+            </>
+          ) : (
+            <>
+              <StatCard
+                icon={MessageSquare}
+                label="Messages (1h)"
+                value={stats?.messagesForwardedHour || 0}
+                subValue={`${stats?.messagesForwardedDay || 0} today`}
+                variant="discord"
+              />
+              <StatCard
+                icon={Hash}
+                label="Active Channels"
+                value={activeChannels}
+                subValue={`${channels.length} total`}
+                variant="telegram"
+              />
+              <StatCard
+                icon={Layers}
+                label="Queue Size"
+                value={stats?.queueSize || 0}
+                subValue="messages pending"
+                variant="default"
+              />
+              <StatCard
+                icon={Clock}
+                label="Uptime"
+                value={formatUptime(stats?.uptime || 0)}
+                variant="success"
+              />
+            </>
+          )}
         </div>
 
         {/* Main Content Grid */}
@@ -101,13 +125,13 @@ export default function Dashboard() {
               </Link>
             </div>
 
-            {mockStats.attachmentFailures > 0 && (
+            {(stats?.attachmentFailures || 0) > 0 && (
               <div className="p-3 rounded-lg bg-warning/10 border border-warning/30 flex items-start gap-2">
                 <AlertTriangle className="w-4 h-4 text-warning flex-shrink-0 mt-0.5" />
                 <div className="text-xs">
                   <p className="font-medium text-warning">Attachment Failures</p>
                   <p className="text-muted-foreground mt-0.5">
-                    {mockStats.attachmentFailures} uploads failed in the last hour
+                    {stats?.attachmentFailures} uploads failed in the last hour
                   </p>
                 </div>
               </div>
@@ -127,7 +151,22 @@ export default function Dashboard() {
                 </Button>
               </Link>
             </div>
-            <ChannelList channels={mockChannels} compact />
+            {channelsLoading ? (
+              <div className="space-y-2">
+                <Skeleton className="h-12 w-full" />
+                <Skeleton className="h-12 w-full" />
+                <Skeleton className="h-12 w-full" />
+              </div>
+            ) : channels.length === 0 ? (
+              <div className="text-center py-8 text-muted-foreground">
+                <p>No channels configured yet.</p>
+                <Link to="/channels">
+                  <Button variant="link" className="mt-2">Add your first channel</Button>
+                </Link>
+              </div>
+            ) : (
+              <ChannelList channels={channels} compact />
+            )}
           </div>
 
           {/* Live Logs */}
@@ -140,7 +179,13 @@ export default function Dashboard() {
                 </Button>
               </Link>
             </div>
-            <LiveLogs logs={mockLogs} maxHeight="280px" />
+            {logs.length === 0 ? (
+              <div className="text-center py-8 text-muted-foreground">
+                <p>No activity yet. Logs will appear here when messages are forwarded.</p>
+              </div>
+            ) : (
+              <LiveLogs logs={logs} maxHeight="280px" />
+            )}
           </div>
         </div>
       </div>

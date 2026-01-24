@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { Layout } from '@/components/layout/Layout';
 import { LiveLogs } from '@/components/dashboard/LiveLogs';
-import { mockLogs, mockChannels } from '@/data/mockData';
+import { useLogs, useRealtimeLogs } from '@/hooks/useLogs';
+import { useChannels } from '@/hooks/useChannels';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -12,41 +13,23 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Search, Pause, Play, Download, Trash2 } from 'lucide-react';
-import { LogEntry } from '@/types';
 import { Badge } from '@/components/ui/badge';
+import { Skeleton } from '@/components/ui/skeleton';
 
 export default function Logs() {
   const [searchQuery, setSearchQuery] = useState('');
   const [filterLevel, setFilterLevel] = useState<string>('all');
   const [filterChannel, setFilterChannel] = useState<string>('all');
   const [isPaused, setIsPaused] = useState(false);
-  const [logs, setLogs] = useState<LogEntry[]>(mockLogs);
 
-  // Simulate live logs
-  useEffect(() => {
-    if (isPaused) return;
+  const { data: initialLogs = [], isLoading: logsLoading } = useLogs(100);
+  const { data: channels = [] } = useChannels();
+  const logs = useRealtimeLogs(isPaused ? [] : initialLogs);
 
-    const messages = [
-      { level: 'success' as const, message: 'Forwarded message from #airdrop-hunting' },
-      { level: 'info' as const, message: 'Polling #market-updates' },
-      { level: 'success' as const, message: 'Uploaded attachment: screenshot.png' },
-      { level: 'info' as const, message: 'Queue processed: 2 messages sent' },
-    ];
+  // Use initial logs when paused, realtime logs otherwise
+  const displayLogs = isPaused ? initialLogs : logs;
 
-    const interval = setInterval(() => {
-      const randomMessage = messages[Math.floor(Math.random() * messages.length)];
-      const newLog: LogEntry = {
-        id: Date.now().toString(),
-        timestamp: new Date(),
-        ...randomMessage,
-      };
-      setLogs((prev) => [newLog, ...prev.slice(0, 99)]);
-    }, 3000);
-
-    return () => clearInterval(interval);
-  }, [isPaused]);
-
-  const filteredLogs = logs.filter((log) => {
+  const filteredLogs = displayLogs.filter((log) => {
     const matchesSearch = log.message.toLowerCase().includes(searchQuery.toLowerCase());
     const matchesLevel = filterLevel === 'all' || log.level === filterLevel;
     const matchesChannel =
@@ -55,11 +38,24 @@ export default function Logs() {
   });
 
   const logCounts = {
-    total: logs.length,
-    info: logs.filter((l) => l.level === 'info').length,
-    success: logs.filter((l) => l.level === 'success').length,
-    warning: logs.filter((l) => l.level === 'warning').length,
-    error: logs.filter((l) => l.level === 'error').length,
+    total: displayLogs.length,
+    info: displayLogs.filter((l) => l.level === 'info').length,
+    success: displayLogs.filter((l) => l.level === 'success').length,
+    warning: displayLogs.filter((l) => l.level === 'warning').length,
+    error: displayLogs.filter((l) => l.level === 'error').length,
+  };
+
+  const handleExport = () => {
+    const logText = filteredLogs
+      .map((log) => `[${log.timestamp.toISOString()}] [${log.level.toUpperCase()}] ${log.message}`)
+      .join('\n');
+    const blob = new Blob([logText], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `relay-logs-${new Date().toISOString().slice(0, 10)}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -91,13 +87,9 @@ export default function Logs() {
                 </>
               )}
             </Button>
-            <Button variant="outline" size="sm">
+            <Button variant="outline" size="sm" onClick={handleExport}>
               <Download className="w-4 h-4 mr-2" />
               Export
-            </Button>
-            <Button variant="outline" size="sm">
-              <Trash2 className="w-4 h-4 mr-2" />
-              Clear
             </Button>
           </div>
         </div>
@@ -150,7 +142,7 @@ export default function Logs() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All Channels</SelectItem>
-              {mockChannels.map((channel) => (
+              {channels.map((channel) => (
                 <SelectItem key={channel.id} value={channel.name}>
                   #{channel.name}
                 </SelectItem>
@@ -168,7 +160,24 @@ export default function Logs() {
         )}
 
         {/* Logs */}
-        <LiveLogs logs={filteredLogs} maxHeight="calc(100vh - 340px)" />
+        {logsLoading ? (
+          <div className="space-y-2">
+            <Skeleton className="h-8 w-full" />
+            <Skeleton className="h-8 w-full" />
+            <Skeleton className="h-8 w-full" />
+            <Skeleton className="h-8 w-full" />
+          </div>
+        ) : filteredLogs.length === 0 ? (
+          <div className="glass-card rounded-xl p-8 text-center">
+            <p className="text-muted-foreground">
+              {displayLogs.length === 0 
+                ? 'No logs yet. Activity will appear here when the worker starts processing messages.'
+                : 'No logs match your search or filter.'}
+            </p>
+          </div>
+        ) : (
+          <LiveLogs logs={filteredLogs} maxHeight="calc(100vh - 340px)" />
+        )}
       </div>
     </Layout>
   );
