@@ -11,8 +11,14 @@ Deno.serve(async (req) => {
   }
 
   try {
-    // Verify worker API key
-    const workerKey = req.headers.get("x-worker-key");
+    // Verify worker API key (supports both x-worker-key header and Authorization: Bearer)
+    let workerKey = req.headers.get("x-worker-key");
+    if (!workerKey) {
+      const authHeader = req.headers.get("authorization");
+      if (authHeader?.startsWith("Bearer ")) {
+        workerKey = authHeader.replace("Bearer ", "");
+      }
+    }
     const expectedKey = Deno.env.get("WORKER_API_KEY");
     
     if (!workerKey || workerKey !== expectedKey) {
