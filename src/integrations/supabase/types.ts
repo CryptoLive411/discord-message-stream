@@ -234,7 +234,8 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      increment_message_count: { Args: { row_id: string }; Returns: number }
+      increment_stat: { Args: { stat_key: string }; Returns: number }
     }
     Enums: {
       [_ in never]: never
