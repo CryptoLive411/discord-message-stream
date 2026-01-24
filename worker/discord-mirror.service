@@ -1,0 +1,19 @@
+[Unit]
+Description=Discord to Telegram Mirror Relay
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/home/YOUR_USERNAME/discord-mirror
+ExecStart=/home/YOUR_USERNAME/discord-mirror/venv/bin/python discord_telegram_relay.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/discord-mirror.log
+StandardError=append:/var/log/discord-mirror-error.log
+
+# Environment
+Environment=DISPLAY=:99
+
+[Install]
+WantedBy=multi-user.target
