@@ -297,11 +297,12 @@ class DiscordWatcher:
         content = f"{channel_id}:{message_id}"
         return hashlib.sha256(content.encode()).hexdigest()[:32]
     
-    async def _scrape_messages(self, channel_url: str) -> list[dict]:
+    async def _scrape_messages(self, channel_url: str, channel_name: str = "unknown") -> list[dict]:
         """Scrape messages from a Discord channel."""
         messages = []
         
         try:
+            await self.api.log('info', f"Navigating to channel", channel_name, f"URL: {channel_url}")
             await self.page.goto(channel_url)
             await asyncio.sleep(4)  # Wait for messages to load
             
@@ -318,35 +319,50 @@ class DiscordWatcher:
             ]
             
             message_elements = []
+            tried_selectors = []
             for selector in selectors:
                 try:
                     elements = await self.page.query_selector_all(selector)
+                    tried_selectors.append(f"{selector}: {len(elements)}")
                     if elements:
+                        await self.api.log('success', f"Found {len(elements)} messages", channel_name, f"Selector: {selector}")
                         logger.info(f"Found {len(elements)} messages with selector: {selector}")
                         message_elements = elements
                         break
                 except Exception as e:
+                    tried_selectors.append(f"{selector}: error")
                     logger.debug(f"Selector {selector} failed: {e}")
                     continue
             
             if not message_elements:
-                # Debug: save page HTML to file for analysis
+                # Log all tried selectors for debugging
+                await self.api.log('warning', f"No messages found with any selector", channel_name, f"Tried: {', '.join(tried_selectors[:4])}")
                 logger.warning(f"No messages found with any selector in {channel_url}")
+                
+                # Check page state
+                page_title = await self.page.title()
+                await self.api.log('warning', f"Page state check", channel_name, f"Title: {page_title}")
+                
+                # Try to get the chat container for debugging
+                chat_container = await self.page.query_selector('[class*="chatContent-"]')
+                if chat_container:
+                    await self.api.log('info', f"Chat container found but no messages matched", channel_name)
+                    logger.debug("Chat container found, but no messages matched selectors")
+                else:
+                    await self.api.log('error', f"Chat container NOT found - page may not be loaded", channel_name)
+                    logger.warning("Chat container not found - page may not be fully loaded")
+                
+                # Debug: save page HTML to file for analysis
                 try:
                     html = await self.page.content()
                     debug_file = f"debug_page_{channel_url.split('/')[-1]}.html"
                     with open(debug_file, 'w', encoding='utf-8') as f:
                         f.write(html)
-                    logger.info(f"Saved debug HTML to {debug_file} - check for actual selectors")
+                    await self.api.log('info', f"Debug HTML saved", channel_name, f"File: {debug_file}")
+                    logger.info(f"Saved debug HTML to {debug_file}")
                 except Exception as e:
                     logger.debug(f"Could not save debug HTML: {e}")
                 
-                # Try to get the chat container for debugging
-                chat_container = await self.page.query_selector('[class*="chatContent-"]')
-                if chat_container:
-                    logger.debug("Chat container found, but no messages matched selectors")
-                else:
-                    logger.warning("Chat container not found - page may not be fully loaded")
                 return messages
             
             for element in message_elements[-20:]:  # Last 20 messages
@@ -388,21 +404,27 @@ class DiscordWatcher:
                     logger.debug(f"Error parsing message element: {e}")
                     continue
             
+            if messages:
+                await self.api.log('info', f"Scraped {len(messages)} messages", channel_name, f"Authors: {', '.join(set(m['author'] for m in messages[:5]))}")
+            
         except Exception as e:
+            await self.api.log('error', f"Error scraping channel: {str(e)}", channel_name)
             logger.error(f"Error scraping channel {channel_url}: {e}")
         
         return messages
     
     async def watch_channels(self):
         """Main loop to watch all enabled channels."""
+        cycle_count = 0
         while self.running:
+            cycle_count += 1
             try:
                 channels = await self.api.get_channels()
+                enabled_channels = [c for c in channels if c.get('enabled')]
                 
-                for channel in channels:
-                    if not channel.get('enabled'):
-                        continue
-                    
+                await self.api.log('info', f"Watch cycle #{cycle_count} starting", details=f"Checking {len(enabled_channels)} enabled channels")
+                
+                for channel in enabled_channels:
                     channel_id = channel['id']
                     channel_url = channel['url']
                     channel_name = channel['name']
@@ -410,7 +432,7 @@ class DiscordWatcher:
                     
                     logger.debug(f"Checking channel: {channel_name}")
                     
-                    messages = await self._scrape_messages(channel_url)
+                    messages = await self._scrape_messages(channel_url, channel_name)
                     
                     # Find new messages (after last fingerprint)
                     new_messages = []
@@ -424,6 +446,9 @@ class DiscordWatcher:
                         elif fingerprint == last_fingerprint:
                             found_last = True
                     
+                    if new_messages:
+                        await self.api.log('success', f"Found {len(new_messages)} new messages", channel_name)
+                    
                     # Push new messages to queue
                     for msg in new_messages:
                         success = await self.api.push_message(channel_id, {
@@ -436,12 +461,14 @@ class DiscordWatcher:
                         
                         if success:
                             logger.info(f"Queued message from {msg['author']} in #{channel_name}")
-                            await self.api.log('info', f"Queued message from {msg['author']}", channel_name)
+                            await self.api.log('success', f"Queued message from {msg['author']}", channel_name, f"Content: {msg['content'][:50]}...")
                 
                 await self.api.update_connection_status('discord', 'connected')
+                await self.api.log('info', f"Watch cycle #{cycle_count} complete", details=f"Next check in {self.config.poll_interval}s")
                 
             except Exception as e:
                 logger.error(f"Error in watch loop: {e}")
+                await self.api.log('error', f"Watch loop error: {str(e)}")
                 await self.api.update_connection_status('discord', 'error', str(e))
             
             await asyncio.sleep(self.config.poll_interval)
