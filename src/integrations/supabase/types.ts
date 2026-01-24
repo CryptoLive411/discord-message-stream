@@ -14,7 +14,221 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      connection_status: {
+        Row: {
+          error_message: string | null
+          id: string
+          last_ping_at: string | null
+          service: string
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          error_message?: string | null
+          id?: string
+          last_ping_at?: string | null
+          service: string
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          error_message?: string | null
+          id?: string
+          last_ping_at?: string | null
+          service?: string
+          status?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      discord_channels: {
+        Row: {
+          created_at: string
+          enabled: boolean
+          id: string
+          last_message_at: string | null
+          last_message_fingerprint: string | null
+          message_count: number
+          mirror_attachments: boolean
+          mirror_replies: boolean
+          name: string
+          server_id: string
+          server_name: string
+          status: string
+          telegram_topic_id: string | null
+          telegram_topic_name: string | null
+          updated_at: string
+          url: string
+        }
+        Insert: {
+          created_at?: string
+          enabled?: boolean
+          id?: string
+          last_message_at?: string | null
+          last_message_fingerprint?: string | null
+          message_count?: number
+          mirror_attachments?: boolean
+          mirror_replies?: boolean
+          name: string
+          server_id: string
+          server_name: string
+          status?: string
+          telegram_topic_id?: string | null
+          telegram_topic_name?: string | null
+          updated_at?: string
+          url: string
+        }
+        Update: {
+          created_at?: string
+          enabled?: boolean
+          id?: string
+          last_message_at?: string | null
+          last_message_fingerprint?: string | null
+          message_count?: number
+          mirror_attachments?: boolean
+          mirror_replies?: boolean
+          name?: string
+          server_id?: string
+          server_name?: string
+          status?: string
+          telegram_topic_id?: string | null
+          telegram_topic_name?: string | null
+          updated_at?: string
+          url?: string
+        }
+        Relationships: []
+      }
+      message_queue: {
+        Row: {
+          attachment_urls: string[] | null
+          author_name: string
+          channel_id: string | null
+          created_at: string
+          discord_message_id: string | null
+          error_message: string | null
+          fingerprint: string
+          id: string
+          message_text: string
+          retry_count: number
+          sent_at: string | null
+          status: string
+        }
+        Insert: {
+          attachment_urls?: string[] | null
+          author_name: string
+          channel_id?: string | null
+          created_at?: string
+          discord_message_id?: string | null
+          error_message?: string | null
+          fingerprint: string
+          id?: string
+          message_text: string
+          retry_count?: number
+          sent_at?: string | null
+          status?: string
+        }
+        Update: {
+          attachment_urls?: string[] | null
+          author_name?: string
+          channel_id?: string | null
+          created_at?: string
+          discord_message_id?: string | null
+          error_message?: string | null
+          fingerprint?: string
+          id?: string
+          message_text?: string
+          retry_count?: number
+          sent_at?: string | null
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "message_queue_channel_id_fkey"
+            columns: ["channel_id"]
+            isOneToOne: false
+            referencedRelation: "discord_channels"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      relay_logs: {
+        Row: {
+          channel_name: string | null
+          created_at: string
+          details: string | null
+          id: string
+          level: string
+          message: string
+        }
+        Insert: {
+          channel_name?: string | null
+          created_at?: string
+          details?: string | null
+          id?: string
+          level: string
+          message: string
+        }
+        Update: {
+          channel_name?: string | null
+          created_at?: string
+          details?: string | null
+          id?: string
+          level?: string
+          message?: string
+        }
+        Relationships: []
+      }
+      system_stats: {
+        Row: {
+          id: string
+          stat_name: string
+          stat_value: number
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          stat_name: string
+          stat_value?: number
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          stat_name?: string
+          stat_value?: number
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      telegram_config: {
+        Row: {
+          created_at: string
+          destination_type: string
+          id: string
+          identifier: string
+          name: string
+          updated_at: string
+          use_topics: boolean
+        }
+        Insert: {
+          created_at?: string
+          destination_type: string
+          id?: string
+          identifier: string
+          name: string
+          updated_at?: string
+          use_topics?: boolean
+        }
+        Update: {
+          created_at?: string
+          destination_type?: string
+          id?: string
+          identifier?: string
+          name?: string
+          updated_at?: string
+          use_topics?: boolean
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
