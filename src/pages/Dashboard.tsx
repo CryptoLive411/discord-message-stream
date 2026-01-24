@@ -21,7 +21,7 @@ function formatUptime(ms: number): string {
 
 export default function Dashboard() {
   const { data: channels = [], isLoading: channelsLoading } = useChannels();
-  const { data: initialLogs = [] } = useLogs(20);
+  const { data: initialLogs = [] } = useLogs(50);
   const logs = useRealtimeLogs(initialLogs);
   const { data: stats, isLoading: statsLoading } = useStats();
   const { data: connectionStatus } = useConnectionStatus();
@@ -184,7 +184,7 @@ export default function Dashboard() {
                 <p>No activity yet. Logs will appear here when messages are forwarded.</p>
               </div>
             ) : (
-              <LiveLogs logs={logs} maxHeight="280px" />
+              <LiveLogs logs={logs} maxHeight="400px" />
             )}
           </div>
         </div>

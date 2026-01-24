@@ -22,7 +22,7 @@ export default function Logs() {
   const [filterChannel, setFilterChannel] = useState<string>('all');
   const [isPaused, setIsPaused] = useState(false);
 
-  const { data: initialLogs = [], isLoading: logsLoading } = useLogs(100);
+  const { data: initialLogs = [], isLoading: logsLoading } = useLogs(200);
   const { data: channels = [] } = useChannels();
   const logs = useRealtimeLogs(isPaused ? [] : initialLogs);
 
