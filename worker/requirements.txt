@@ -1,0 +1,17 @@
+# Discord to Telegram Relay Worker Dependencies
+# Install with: pip install -r requirements.txt
+
+# Browser automation for Discord
+playwright>=1.40.0
+
+# Telegram MTProto client
+telethon>=1.34.0
+
+# Async HTTP client for API calls
+httpx>=0.25.0
+
+# Environment variable loading
+python-dotenv>=1.0.0
+
+# Cryptography for Telethon
+cryptography>=41.0.0
