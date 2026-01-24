@@ -49,6 +49,15 @@ Deno.serve(async (req) => {
           .single();
 
         if (existing) {
+          // Even if duplicate, advance cursor so the watcher can stop re-sending history.
+          await supabase
+            .from("discord_channels")
+            .update({
+              last_message_fingerprint: fingerprint,
+              last_message_at: new Date().toISOString(),
+            })
+            .eq("id", channel_id);
+
           return new Response(
             JSON.stringify({ success: true, duplicate: true }),
             { headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -71,14 +80,20 @@ Deno.serve(async (req) => {
         if (insertError) throw insertError;
 
         // Update channel's last message info
-        await supabase
+        const nowIso = new Date().toISOString();
+        const { error: channelUpdateError } = await supabase
           .from("discord_channels")
           .update({
             last_message_fingerprint: fingerprint,
-            last_message_at: new Date().toISOString(),
-            message_count: supabase.rpc("increment_message_count", { row_id: channel_id }),
+            last_message_at: nowIso,
           })
           .eq("id", channel_id);
+
+        if (channelUpdateError) throw channelUpdateError;
+
+        // Increment message count via RPC (keeps logic centralized)
+        const { error: incErr } = await supabase.rpc("increment_message_count", { row_id: channel_id });
+        if (incErr) throw incErr;
 
         // Log the event
         const { data: channel } = await supabase
@@ -96,6 +111,24 @@ Deno.serve(async (req) => {
 
         return new Response(
           JSON.stringify({ success: true, duplicate: false }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      case "set_channel_cursor": {
+        const { channel_id, last_message_fingerprint, last_message_at } = data;
+        const { error } = await supabase
+          .from("discord_channels")
+          .update({
+            last_message_fingerprint,
+            last_message_at: last_message_at || new Date().toISOString(),
+          })
+          .eq("id", channel_id);
+
+        if (error) throw error;
+
+        return new Response(
+          JSON.stringify({ success: true }),
           { headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
@@ -155,7 +188,8 @@ Deno.serve(async (req) => {
       }
 
       case "mark_failed": {
-        const { message_id, error_message } = data;
+        const { message_id } = data;
+        const error_message = data?.error_message ?? data?.error ?? "Unknown error";
 
         const { data: msg } = await supabase
           .from("message_queue")
