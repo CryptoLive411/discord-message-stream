@@ -325,8 +325,14 @@ class DiscordWatcher:
         
         try:
             await self.api.log('info', f"Navigating to channel", channel_name, f"URL: {channel_url}")
-            await self.page.goto(channel_url)
-            await asyncio.sleep(4)  # Wait for messages to load
+            await self.page.goto(channel_url, wait_until='networkidle')
+            await asyncio.sleep(2)
+            
+            # Scroll to bottom of chat to ensure messages are hydrated (Discord virtualizes the list)
+            chat_scroller = await self.page.query_selector('[class*="messagesWrapper-"]')
+            if chat_scroller:
+                await chat_scroller.evaluate('el => el.scrollTop = el.scrollHeight')
+                await asyncio.sleep(1)
             
             # Try multiple selectors for Discord messages (Discord changes these frequently)
             selectors = [
@@ -337,7 +343,6 @@ class DiscordWatcher:
                 'li[id^="chat-messages-"]',  # List item messages
                 '[class*="messageListItem"]',  # Without hyphen
                 'ol[class*="scrollerInner-"] > li',  # Chat scroller list items
-                '[class*="scrollerInner-"] li[class*="messageListItem"]',  # Nested in scroller
             ]
             
             message_elements = []
@@ -357,92 +362,93 @@ class DiscordWatcher:
                     continue
             
             if not message_elements:
-                # Log all tried selectors for debugging
                 await self.api.log('warning', f"No messages found with any selector", channel_name, f"Tried: {', '.join(tried_selectors[:4])}")
                 logger.warning(f"No messages found with any selector in {channel_url}")
-                
-                # Check page state
-                page_title = await self.page.title()
-                await self.api.log('warning', f"Page state check", channel_name, f"Title: {page_title}")
-                
-                # Try to get the chat container for debugging
-                chat_container = await self.page.query_selector('[class*="chatContent-"]')
-                if chat_container:
-                    await self.api.log('info', f"Chat container found but no messages matched", channel_name)
-                    logger.debug("Chat container found, but no messages matched selectors")
-                else:
-                    await self.api.log('error', f"Chat container NOT found - page may not be loaded", channel_name)
-                    logger.warning("Chat container not found - page may not be fully loaded")
-                
-                # Debug: save page HTML to file for analysis
-                try:
-                    html = await self.page.content()
-                    debug_file = f"debug_page_{channel_url.split('/')[-1]}.html"
-                    with open(debug_file, 'w', encoding='utf-8') as f:
-                        f.write(html)
-                    await self.api.log('info', f"Debug HTML saved", channel_name, f"File: {debug_file}")
-                    logger.info(f"Saved debug HTML to {debug_file}")
-                except Exception as e:
-                    logger.debug(f"Could not save debug HTML: {e}")
-                
                 return messages
             
-            for element in message_elements[-20:]:  # Last 20 messages
+            # Process only last 15 messages to reduce noise
+            for element in message_elements[-15:]:
                 try:
+                    # Scroll this element into view to ensure it's hydrated
+                    await element.scroll_into_view_if_needed()
+                    await asyncio.sleep(0.1)  # Small delay for hydration
+                    
                     # Extract message ID from data attribute
                     message_id = await element.get_attribute('id')
                     if not message_id:
+                        message_id = await element.get_attribute('data-list-item-id')
+                    if not message_id:
                         continue
                     
-                    # Extract author (Discord DOM changes often; use fallbacks)
-                    author = 'Unknown'
-                    for sel in (
+                    # Extract author using multiple fallback selectors
+                    author = ''
+                    author_selectors = [
                         '[class*="username-"]',
-                        'h3 [class*="username"]',
-                        'span[class*="username"]',
-                        '[data-testid="message-username"]',
-                    ):
-                        author_el = await element.query_selector(sel)
-                        if author_el:
-                            txt = (await author_el.text_content()) or ''
-                            txt = txt.strip()
-                            if txt:
-                                author = txt
-                                break
-
-                    # Extract message content (prefer message-content id / slate text)
+                        'h3 span[class*="username"]',
+                        'span[class*="headerText-"] span',
+                        '[class*="headerText-"] [class*="username"]',
+                        'h3[class*="header-"] span',
+                    ]
+                    for sel in author_selectors:
+                        try:
+                            author_el = await element.query_selector(sel)
+                            if author_el:
+                                txt = await author_el.inner_text()
+                                if txt and txt.strip():
+                                    author = txt.strip()
+                                    break
+                        except:
+                            continue
+                    
+                    # Extract message content using multiple fallback selectors
                     content = ''
-                    for sel in (
+                    content_selectors = [
                         '[id^="message-content-"]',
+                        'div[id^="message-content-"]',
                         'span[id^="message-content-"]',
                         '[class*="messageContent-"]',
                         'div[class*="markup-"]',
-                        '[data-slate-string="true"]',
-                    ):
-                        content_el = await element.query_selector(sel)
-                        if content_el:
-                            txt = (await content_el.inner_text()) or (await content_el.text_content()) or ''
-                            txt = txt.strip()
-                            if txt:
-                                content = txt
-                                break
+                    ]
+                    for sel in content_selectors:
+                        try:
+                            content_el = await element.query_selector(sel)
+                            if content_el:
+                                # Use inner_text() which gets rendered/computed text
+                                txt = await content_el.inner_text()
+                                if txt and txt.strip():
+                                    content = txt.strip()
+                                    break
+                        except:
+                            continue
+                    
+                    # Skip messages with no author AND no content (likely system messages or empty)
+                    if not author and not content:
+                        continue
                     
                     # Extract attachments
                     attachments = []
-                    attachment_els = await element.query_selector_all('[class*="imageWrapper-"] img, [class*="attachment-"] a')
-                    for att_el in attachment_els:
-                        src = await att_el.get_attribute('src') or await att_el.get_attribute('href')
-                        if src:
-                            attachments.append(src)
+                    try:
+                        attachment_els = await element.query_selector_all('[class*="imageWrapper-"] img, [class*="attachment-"] a, a[class*="imageWrapper-"]')
+                        for att_el in attachment_els:
+                            src = await att_el.get_attribute('src') or await att_el.get_attribute('href')
+                            if src and not src.startswith('data:'):
+                                attachments.append(src)
+                    except:
+                        pass
                     
                     # Extract timestamp
-                    time_el = await element.query_selector('time')
-                    timestamp = await time_el.get_attribute('datetime') if time_el else None
+                    timestamp = None
+                    try:
+                        time_el = await element.query_selector('time')
+                        if time_el:
+                            timestamp = await time_el.get_attribute('datetime')
+                    except:
+                        pass
                     
                     messages.append({
                         'message_id': message_id,
-                        'author': author.strip(),
-                        'content': content.strip(),
+                        'author': author or 'Unknown',
+                        'content': content,
                         'attachments': attachments,
                         'timestamp': timestamp
                     })
@@ -452,7 +458,8 @@ class DiscordWatcher:
                     continue
             
             if messages:
-                await self.api.log('info', f"Scraped {len(messages)} messages", channel_name, f"Authors: {', '.join(set(m['author'] for m in messages[:5]))}")
+                authors_sample = ', '.join(set(m['author'] for m in messages[:5] if m['author'] != 'Unknown'))
+                await self.api.log('info', f"Scraped {len(messages)} messages", channel_name, f"Authors: {authors_sample or 'Unknown'}")
             
         except Exception as e:
             await self.api.log('error', f"Error scraping channel: {str(e)}", channel_name)
