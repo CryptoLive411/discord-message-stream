@@ -52,7 +52,7 @@ class Config:
     telegram_api_id: int
     telegram_api_hash: str
     telegram_session_name: str = "discord_mirror_session"
-    poll_interval: int = 5  # seconds between Discord checks
+    poll_interval: int = 2  # seconds between Discord checks (fast polling)
     headless: bool = True   # Run browser in headless mode
     browser_profile_path: str = "./discord_profile"
     
@@ -70,7 +70,7 @@ class Config:
             telegram_api_id=int(os.getenv('TELEGRAM_API_ID')),
             telegram_api_hash=os.getenv('TELEGRAM_API_HASH'),
             telegram_session_name=os.getenv('TELEGRAM_SESSION_NAME', 'discord_mirror_session'),
-            poll_interval=int(os.getenv('POLL_INTERVAL', '5')),
+            poll_interval=int(os.getenv('POLL_INTERVAL', '2')),
             headless=os.getenv('HEADLESS', 'true').lower() == 'true',
             browser_profile_path=os.getenv('BROWSER_PROFILE_PATH', './discord_profile'),
         )
@@ -325,14 +325,14 @@ class DiscordWatcher:
         
         try:
             await self.api.log('info', f"Navigating to channel", channel_name, f"URL: {channel_url}")
-            await self.page.goto(channel_url, wait_until='networkidle')
-            await asyncio.sleep(2)
+            await self.page.goto(channel_url, wait_until='domcontentloaded')
+            await asyncio.sleep(0.5)
             
             # Scroll to bottom of chat to ensure messages are hydrated (Discord virtualizes the list)
             chat_scroller = await self.page.query_selector('[class*="messagesWrapper-"]')
             if chat_scroller:
                 await chat_scroller.evaluate('el => el.scrollTop = el.scrollHeight')
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.3)
             
             # Try multiple selectors for Discord messages (Discord changes these frequently)
             selectors = [
@@ -637,7 +637,7 @@ class TelegramSender:
                 messages = await self.api.get_pending_messages()
                 
                 if not messages:
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(0.5)
                     continue
                 
                 # Get destination
@@ -708,7 +708,7 @@ class TelegramSender:
                 logger.error(f"Error in send loop: {e}")
                 await self.api.update_connection_status('telegram', 'error', str(e))
             
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.3)
     
     async def stop(self):
         """Stop the sender and disconnect."""
