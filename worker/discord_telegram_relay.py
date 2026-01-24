@@ -181,13 +181,35 @@ class APIClient:
                 headers=self.headers,
                 json={
                     "action": "mark_failed",
-                    "data": {"message_id": message_id, "error": error}
+                    # backend expects error_message
+                    "data": {"message_id": message_id, "error_message": error}
                 }
             )
             response.raise_for_status()
             return True
         except Exception as e:
             logger.error(f"Failed to mark message as failed: {e}")
+            return False
+
+    async def set_channel_cursor(self, channel_id: str, fingerprint: str, last_message_at: Optional[str] = None) -> bool:
+        """Update a channel's last seen message fingerprint without enqueueing messages."""
+        try:
+            response = await self.client.post(
+                f"{self.base_url}/worker-push",
+                headers=self.headers,
+                json={
+                    "action": "set_channel_cursor",
+                    "data": {
+                        "channel_id": channel_id,
+                        "last_message_fingerprint": fingerprint,
+                        "last_message_at": last_message_at,
+                    },
+                },
+            )
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set channel cursor: {e}")
             return False
     
     async def update_connection_status(self, service: str, status: str, error: Optional[str] = None) -> bool:
@@ -372,13 +394,38 @@ class DiscordWatcher:
                     if not message_id:
                         continue
                     
-                    # Extract author
-                    author_el = await element.query_selector('[class*="username-"]')
-                    author = await author_el.text_content() if author_el else 'Unknown'
-                    
-                    # Extract message content
-                    content_el = await element.query_selector('[class*="messageContent-"]')
-                    content = await content_el.text_content() if content_el else ''
+                    # Extract author (Discord DOM changes often; use fallbacks)
+                    author = 'Unknown'
+                    for sel in (
+                        '[class*="username-"]',
+                        'h3 [class*="username"]',
+                        'span[class*="username"]',
+                        '[data-testid="message-username"]',
+                    ):
+                        author_el = await element.query_selector(sel)
+                        if author_el:
+                            txt = (await author_el.text_content()) or ''
+                            txt = txt.strip()
+                            if txt:
+                                author = txt
+                                break
+
+                    # Extract message content (prefer message-content id / slate text)
+                    content = ''
+                    for sel in (
+                        '[id^="message-content-"]',
+                        'span[id^="message-content-"]',
+                        '[class*="messageContent-"]',
+                        'div[class*="markup-"]',
+                        '[data-slate-string="true"]',
+                    ):
+                        content_el = await element.query_selector(sel)
+                        if content_el:
+                            txt = (await content_el.inner_text()) or (await content_el.text_content()) or ''
+                            txt = txt.strip()
+                            if txt:
+                                content = txt
+                                break
                     
                     # Extract attachments
                     attachments = []
@@ -433,6 +480,18 @@ class DiscordWatcher:
                     logger.debug(f"Checking channel: {channel_name}")
                     
                     messages = await self._scrape_messages(channel_url, channel_name)
+
+                    # If this channel has never been checkpointed, do NOT backfill old messages.
+                    # Instead, set the cursor to the newest visible message and start from next cycle.
+                    if last_fingerprint is None:
+                        if messages:
+                            newest = messages[-1]
+                            newest_fp = self._generate_fingerprint(channel_id, newest['message_id'])
+                            await self.api.set_channel_cursor(channel_id, newest_fp, newest.get('timestamp'))
+                            await self.api.log('info', 'Initialized channel cursor (skipping backfill)', channel_name)
+                        else:
+                            await self.api.log('warning', 'No messages visible to initialize cursor', channel_name)
+                        continue
                     
                     # Find new messages (after last fingerprint)
                     new_messages = []
@@ -462,6 +521,12 @@ class DiscordWatcher:
                         if success:
                             logger.info(f"Queued message from {msg['author']} in #{channel_name}")
                             await self.api.log('success', f"Queued message from {msg['author']}", channel_name, f"Content: {msg['content'][:50]}...")
+
+                    # Always advance cursor to newest seen message so we don't reprocess history
+                    if messages:
+                        newest = messages[-1]
+                        newest_fp = self._generate_fingerprint(channel_id, newest['message_id'])
+                        await self.api.set_channel_cursor(channel_id, newest_fp, newest.get('timestamp'))
                 
                 await self.api.update_connection_status('discord', 'connected')
                 await self.api.log('info', f"Watch cycle #{cycle_count} complete", details=f"Next check in {self.config.poll_interval}s")
@@ -546,19 +611,17 @@ class TelegramSender:
     
     async def _format_message(self, msg: dict, channel_name: str) -> str:
         """Format a message for Telegram."""
-        parts = []
-        
-        # Add channel prefix
-        parts.append(f"**#{channel_name}**")
-        
-        # Add author
-        parts.append(f"**{msg['author_name']}:**")
-        
-        # Add content
-        if msg.get('message_text'):
-            parts.append(msg['message_text'])
-        
-        return '\n'.join(parts)
+        author = (msg.get('author_name') or '').strip()
+        text = (msg.get('message_text') or '').strip()
+
+        # Avoid noisy "Unknown:" lines
+        header = f"[{channel_name}]"
+        if author and author.lower() != 'unknown':
+            header += f" {author}:"
+
+        if text:
+            return f"{header} {text}".strip()
+        return header
     
     async def send_pending_messages(self):
         """Main loop to send pending messages."""
@@ -577,12 +640,21 @@ class TelegramSender:
                     await asyncio.sleep(10)
                     continue
                 
+                # Fetch channels once per batch (avoid N calls)
+                channels = await self.api.get_channels()
+
                 for msg in messages:
                     try:
                         # Get channel info for formatting
-                        channels = await self.api.get_channels()
                         channel = next((c for c in channels if c['id'] == msg.get('channel_id')), None)
                         channel_name = channel['name'] if channel else 'Unknown'
+
+                        attachments = msg.get('attachment_urls', []) or []
+                        has_text = bool((msg.get('message_text') or '').strip())
+                        if not has_text and not attachments:
+                            await self.api.mark_failed(msg['id'], 'Empty message (no text/attachments)')
+                            await self.api.log('warning', 'Skipped empty message (no text/attachments)', channel_name)
+                            continue
                         
                         # Format message
                         text = await self._format_message(msg, channel_name)
@@ -597,11 +669,11 @@ class TelegramSender:
                             dest['entity'],
                             text,
                             reply_to=reply_to,
-                            parse_mode='md'
+                            # Send plain text; avoids markdown surprises
+                            parse_mode=None
                         )
                         
                         # Handle attachments
-                        attachments = msg.get('attachment_urls', [])
                         if attachments and channel and channel.get('mirror_attachments', True):
                             for url in attachments[:5]:  # Limit to 5 attachments
                                 try:
