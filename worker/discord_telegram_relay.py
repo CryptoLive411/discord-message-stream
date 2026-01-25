@@ -273,19 +273,27 @@ class ChannelTab:
     # JavaScript to inject for real-time message detection
     OBSERVER_SCRIPT = """
     (function() {
-        // Avoid double-injection
-        if (window.__discordObserverActive) return;
-        window.__discordObserverActive = true;
-        
-        const seenMessages = new Set();
-        let lastProcessedId = null;
-        // Track the newest (max) Discord snowflake we see at init time.
-        // Anything older/equal is treated as history/backfill and ignored.
-        let initialMaxSnowflake = 0n;
-        let hasInitialMaxSnowflake = false;
-        // Warmup window: Discord hydrates existing messages after navigation.
-        // During this time, we record IDs but do NOT forward anything.
-        let warmupUntil = Date.now() + 4000;
+        // Persistent state so periodic re-injection can reattach safely.
+        const state = window.__discordObserverState || (window.__discordObserverState = {
+            channelKey: null,
+            seenMessages: new Set(),
+            baselineSnowflake: 0n,
+            baselineLocked: false,
+            warmupUntil: Date.now() + 4000,
+            lastDomChangeAt: Date.now(),
+            quietPeriodMs: 2500,
+        });
+
+        const channelKey = location.pathname;
+        if (state.channelKey !== channelKey) {
+            state.channelKey = channelKey;
+            state.seenMessages = new Set();
+            state.baselineSnowflake = 0n;
+            state.baselineLocked = false;
+            state.warmupUntil = Date.now() + 4000;
+            state.lastDomChangeAt = Date.now();
+            console.log('[Observer] Channel changed, state reset:', channelKey);
+        }
         
         function parseSnowflakeFromMessageId(id) {
             // Examples we may see:
@@ -309,48 +317,65 @@ class ChannelTab:
             return /https?:\/\/(cdn\.discordapp\.com|media\.discordapp\.net)\/(attachments|ephemeral-attachments)\//.test(url);
         }
 
-        // Initialize with existing messages to avoid backfill
-        function initializeSeenMessages() {
-            const messages = document.querySelectorAll('[id^="chat-messages-"], [data-list-item-id^="chat-messages-"]');
-            messages.forEach(msg => {
-                const id = msg.id || msg.getAttribute('data-list-item-id');
-                if (id) seenMessages.add(id);
+        function getMessageNodes(root = document) {
+            return root.querySelectorAll('[id^="chat-messages-"], [data-list-item-id^="chat-messages-"]');
+        }
 
-                const snowflake = parseSnowflakeFromMessageId(id);
-                if (snowflake !== null) {
-                    if (!hasInitialMaxSnowflake || snowflake > initialMaxSnowflake) {
-                        initialMaxSnowflake = snowflake;
-                        hasInitialMaxSnowflake = true;
-                    }
-                }
-            });
-            if (messages.length > 0) {
-                lastProcessedId = messages[messages.length - 1].id;
+        // During priming, we record all IDs we see and continuously advance the
+        // baseline to the newest snowflake observed. We only start forwarding
+        // after a quiet period (Discord hydration settled).
+        function noteSeenMessageElement(element) {
+            const id = element?.id || element?.getAttribute?.('data-list-item-id');
+            if (!id) return;
+            state.seenMessages.add(id);
+            const snowflake = parseSnowflakeFromMessageId(id);
+            if (snowflake !== null && snowflake > state.baselineSnowflake) {
+                state.baselineSnowflake = snowflake;
             }
-            console.log('[Observer] Initialized with', seenMessages.size, 'existing messages', hasInitialMaxSnowflake ? `(initialMax=${initialMaxSnowflake.toString()})` : '(no snowflake parsed)');
+            state.lastDomChangeAt = Date.now();
+        }
+
+        function primeBaselineFromExistingDom() {
+            const messages = getMessageNodes();
+            messages.forEach(noteSeenMessageElement);
+            console.log('[Observer] Priming baseline with', messages.length, 'nodes', state.baselineSnowflake > 0n ? `(baseline=${state.baselineSnowflake.toString()})` : '(no snowflake parsed)');
+        }
+
+        function maybeLockBaseline() {
+            if (state.baselineLocked) return;
+            const quietFor = Date.now() - state.lastDomChangeAt;
+            if (quietFor >= state.quietPeriodMs && state.baselineSnowflake > 0n) {
+                state.baselineLocked = true;
+                console.log('[Observer] Baseline locked:', state.baselineSnowflake.toString(), `(quiet ${quietFor}ms)`);
+            }
         }
         
         // Extract message data from a DOM element
         function extractMessage(element) {
             const id = element.id || element.getAttribute('data-list-item-id');
-            if (!id || seenMessages.has(id)) return null;
+            if (!id || state.seenMessages.has(id)) return null;
+            // Never forward until we've locked a baseline.
+            // Otherwise late Discord hydration can look like "new messages".
+            if (!state.baselineLocked) {
+                noteSeenMessageElement(element);
+                return null;
+            }
             
-            seenMessages.add(id);
+            state.seenMessages.add(id);
 
-            // Hard backfill prevention: ignore any message older/equal to newest message at startup.
-            if (hasInitialMaxSnowflake) {
-                const snowflake = parseSnowflakeFromMessageId(id);
-                if (snowflake !== null && snowflake <= initialMaxSnowflake) {
-                    return null;
-                }
-                // If it is newer, advance our cursor so we keep moving forward.
-                if (snowflake !== null && snowflake > initialMaxSnowflake) {
-                    initialMaxSnowflake = snowflake;
-                }
+            // Hard backfill prevention: ignore any message older/equal to the
+            // newest snowflake observed during priming.
+            const snowflake = parseSnowflakeFromMessageId(id);
+            if (snowflake !== null && snowflake <= state.baselineSnowflake) {
+                return null;
+            }
+            // If it is newer, advance cursor so we keep moving forward.
+            if (snowflake !== null && snowflake > state.baselineSnowflake) {
+                state.baselineSnowflake = snowflake;
             }
             
             // Ignore anything that appears during initial hydration / warmup.
-            if (Date.now() < warmupUntil) {
+            if (Date.now() < state.warmupUntil) {
                 console.log('[Observer] Skipping warmup message:', id);
                 return null;
             }
@@ -377,13 +402,22 @@ class ChannelTab:
             const contentSelectors = [
                 '[id^="message-content-"]',
                 '[class*="messageContent-"]',
-                '[class*="markup-"]',
             ];
             for (const sel of contentSelectors) {
                 const el = element.querySelector(sel);
                 if (el && el.innerText && el.innerText.trim()) {
                     content = el.innerText.trim();
                     break;
+                }
+            }
+
+            // If Discord somehow includes author decoration in extracted text, strip it.
+            if (content && author && author !== 'Unknown') {
+                const escaped = author.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                try {
+                    content = content.replace(new RegExp('^\\s*[\\p{Extended_Pictographic}\\s\\u200D\\uFE0F]*' + escaped + '\\s*:?\\s*', 'u'), '').trim();
+                } catch {
+                    // If unicode properties unsupported, fail open (keep content)
                 }
             }
             
@@ -420,6 +454,10 @@ class ChannelTab:
                                   node.getAttribute?.('data-list-item-id')?.startsWith('chat-messages-');
                 
                 if (isMessage) {
+                    if (!state.baselineLocked) {
+                        noteSeenMessageElement(node);
+                        return;
+                    }
                     const msg = extractMessage(node);
                     if (msg) {
                         console.log('[Observer] New message detected:', msg.author, msg.content?.substring(0, 50));
@@ -429,8 +467,12 @@ class ChannelTab:
                 
                 // Also check children (for batch insertions)
                 if (node.querySelectorAll) {
-                    const childMessages = node.querySelectorAll('[id^="chat-messages-"]');
+                    const childMessages = node.querySelectorAll('[id^="chat-messages-"], [data-list-item-id^="chat-messages-"]');
                     childMessages.forEach(child => {
+                        if (!state.baselineLocked) {
+                            noteSeenMessageElement(child);
+                            return;
+                        }
                         const msg = extractMessage(child);
                         if (msg) {
                             console.log('[Observer] New message detected (child):', msg.author);
@@ -453,11 +495,22 @@ class ChannelTab:
                 setTimeout(setupObserver, 1000);
                 return;
             }
+
+            // Reattach cleanly on reinjection / DOM replacement.
+            try {
+                if (window.__discordMutationObserver) {
+                    window.__discordMutationObserver.disconnect();
+                }
+            } catch {}
             
             const observer = new MutationObserver((mutations) => {
                 for (const mutation of mutations) {
                     if (mutation.addedNodes.length > 0) {
                         processNewMessages(mutation.addedNodes);
+                        if (!state.baselineLocked) {
+                            // While priming, every mutation pushes out the quiet window.
+                            state.lastDomChangeAt = Date.now();
+                        }
                     }
                 }
             });
@@ -466,6 +519,8 @@ class ChannelTab:
                 childList: true,
                 subtree: true
             });
+
+            window.__discordMutationObserver = observer;
             
             console.log('[Observer] MutationObserver active on', container.className);
         }
@@ -480,10 +535,21 @@ class ChannelTab:
         
         // Wait for messages to appear before initializing
         function waitForInitialMessages(attempt = 0) {
-            const messages = document.querySelectorAll('[id^="chat-messages-"], [data-list-item-id^="chat-messages-"]');
+            const messages = getMessageNodes();
             if (messages.length > 0) {
-                initializeSeenMessages();
                 setupObserver();
+
+                // Prime baseline aggressively until Discord settles.
+                primeBaselineFromExistingDom();
+                const primingInterval = setInterval(() => {
+                    if (state.baselineLocked) {
+                        clearInterval(primingInterval);
+                        return;
+                    }
+                    scrollToBottom();
+                    primeBaselineFromExistingDom();
+                    maybeLockBaseline();
+                }, 500);
                 return;
             }
             if (attempt >= 30) {
@@ -525,20 +591,27 @@ class ChannelTab:
         try:
             msg = json.loads(message_json)
             fingerprint = self._generate_fingerprint(msg['message_id'])
+
+            # Extra safety: if the extracted text somehow contains the author prefix
+            # (e.g. "Chris_Khan: hello"), strip it so Telegram only receives content.
+            raw_text = (msg.get('content') or '').strip()
+            author = (msg.get('author') or '').strip()
+            if author and raw_text:
+                raw_text = re.sub(rf'^\s*{re.escape(author)}\s*:\s*', '', raw_text).strip()
             
-            logger.info(f"[{self.channel_name}] New message from {msg['author']}: {msg['content'][:50] if msg['content'] else '[attachment]'}...")
+            logger.info(f"[{self.channel_name}] New message detected: {raw_text[:50] if raw_text else '[attachment]'}...")
             
             # Push to queue immediately
             success = await self.api.push_message(self.channel_id, {
                 'fingerprint': fingerprint,
                 'discord_message_id': msg['message_id'],
                 'author_name': msg['author'],
-                'message_text': msg['content'],
+                'message_text': raw_text,
                 'attachment_urls': msg['attachments']
             })
             
             if success:
-                await self.api.log('success', f"Queued message from {msg['author']}", self.channel_name, f"Content: {msg['content'][:50] if msg['content'] else '[attachment]'}...")
+                await self.api.log('success', "Queued message", self.channel_name, f"Content: {raw_text[:80] if raw_text else '[attachment]'}")
                 # Update cursor
                 await self.api.set_channel_cursor(self.channel_id, fingerprint, msg.get('timestamp'))
             
