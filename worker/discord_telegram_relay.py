@@ -266,50 +266,84 @@ class ChannelTab:
     """Manages a single browser tab watching one Discord channel."""
     
     # JavaScript to inject for real-time message detection
-    # SIMPLIFIED VERSION - just track seen messages, forward anything new
+    # Robust anti-backfill:
+    # 1) Scroll to bottom
+    # 2) Wait for chat to stabilize
+    # 3) Capture the newest visible snowflake as a baseline
+    # 4) Only forward messages with snowflake > baseline forever
     OBSERVER_SCRIPT = """
     (function() {
-        // Allow re-injection but preserve state
+        const MSG_SELECTOR = '[id^="chat-messages-"], [data-list-item-id^="chat-messages-"]';
+
         if (!window.__discordObserverState) {
             window.__discordObserverState = {
                 seenMessages: new Set(),
-                isInitialized: false
+                isInitialized: false,
+                isPrimed: false,
+                baselineSnowflake: 0n,
+                candidateMaxSnowflake: 0n,
+                lastMutationAt: Date.now(),
             };
-            console.log('[Observer] Initialized state');
+            console.log('[Observer] State created');
         }
-        
+
         const state = window.__discordObserverState;
         const seenMessages = state.seenMessages;
+
+        function parseSnowflakeFromMessageId(id) {
+            if (!id) return null;
+            const matches = id.match(/(\\d{16,20})/g);
+            if (!matches || matches.length === 0) return null;
+            const token = matches[matches.length - 1];
+            try { return BigInt(token); } catch { return null; }
+        }
 
         function isDiscordAttachmentUrl(url) {
             if (!url) return false;
             return /https?:\\/\\/(cdn\\.discordapp\\.com|media\\.discordapp\\.net)\\/(attachments|ephemeral-attachments)\\//.test(url);
         }
 
-        // Mark all currently visible messages as "seen" on startup
-        function initializeSeenMessages() {
-            if (state.isInitialized) return;
-            
-            const messages = document.querySelectorAll('[id^="chat-messages-"], [data-list-item-id^="chat-messages-"]');
-            messages.forEach(msg => {
-                const id = msg.id || msg.getAttribute('data-list-item-id');
-                if (id) seenMessages.add(id);
+        function scanVisibleMessagesAndMaxSnowflake() {
+            let max = state.candidateMaxSnowflake || 0n;
+            const messages = document.querySelectorAll(MSG_SELECTOR);
+            messages.forEach(el => {
+                const id = el.id || el.getAttribute('data-list-item-id');
+                if (id) {
+                    seenMessages.add(id);
+                    const sf = parseSnowflakeFromMessageId(id);
+                    if (sf !== null && sf > max) max = sf;
+                }
             });
-            
-            state.isInitialized = true;
-            console.log('[Observer] Marked', seenMessages.size, 'existing messages as seen - will only forward NEW messages');
+            state.candidateMaxSnowflake = max;
+            return max;
         }
-        
-        // Extract message data from a DOM element
+
+        function initialize() {
+            if (state.isInitialized) return;
+            // Mark anything currently visible as seen immediately
+            scanVisibleMessagesAndMaxSnowflake();
+            state.isInitialized = true;
+            console.log('[Observer] Initialized; waiting to prime baseline (no backfill)');
+        }
+
         function extractMessage(element) {
             const id = element.id || element.getAttribute('data-list-item-id');
-            
-            // Skip if no id or already seen
             if (!id || seenMessages.has(id)) return null;
-            
-            // Mark as seen immediately
             seenMessages.add(id);
-            
+
+            const sf = parseSnowflakeFromMessageId(id);
+            if (!state.isPrimed) {
+                // During priming, NEVER forward anything; just learn the newest snowflake.
+                if (sf !== null && sf > state.candidateMaxSnowflake) state.candidateMaxSnowflake = sf;
+                return null;
+            }
+
+            // After priming, enforce cursor.
+            if (sf !== null) {
+                if (sf <= state.baselineSnowflake) return null;
+                state.baselineSnowflake = sf;
+            }
+
             // Extract author
             let author = 'Unknown';
             const authorSelectors = [
@@ -325,7 +359,7 @@ class ChannelTab:
                     break;
                 }
             }
-            
+
             // Extract content
             let content = '';
             const contentSelectors = [
@@ -340,7 +374,7 @@ class ChannelTab:
                     break;
                 }
             }
-            
+
             // Extract attachments
             const attachments = [];
             element.querySelectorAll('a[href]').forEach(a => {
@@ -351,105 +385,110 @@ class ChannelTab:
                 const url = img.src;
                 if (isDiscordAttachmentUrl(url) && !attachments.includes(url)) attachments.push(url);
             });
-            
-            // Skip empty messages
+
             if (!content && attachments.length === 0) return null;
-            
+
             return {
                 message_id: id,
                 author: author,
                 content: content,
                 attachments: attachments,
-                timestamp: new Date().toISOString()
+                timestamp: new Date().toISOString(),
             };
         }
-        
-        // Process new message nodes
+
         function processNewMessages(nodes) {
-            const MSG_SELECTOR = '[id^="chat-messages-"], [data-list-item-id^="chat-messages-"]';
             nodes.forEach(node => {
                 if (node.nodeType !== 1) return;
-
                 const candidates = [];
                 if (node.matches?.(MSG_SELECTOR)) candidates.push(node);
-                if (node.querySelectorAll) {
-                    node.querySelectorAll(MSG_SELECTOR).forEach(el => candidates.push(el));
-                }
-
+                if (node.querySelectorAll) node.querySelectorAll(MSG_SELECTOR).forEach(el => candidates.push(el));
                 candidates.forEach(el => {
                     const msg = extractMessage(el);
                     if (msg) {
-                        console.log('[Observer] New message:', msg.author, msg.content?.substring(0, 50));
+                        console.log('[Observer] Forwarding new message:', msg.author, msg.content?.substring(0, 50));
                         window.__onNewMessage(JSON.stringify(msg));
                     }
                 });
             });
         }
-        
-        // Set up MutationObserver
+
         function setupObserver() {
             const container = document.querySelector('[class*="messagesWrapper-"]') ||
                               document.querySelector('[class*="scrollerInner-"]') ||
                               document.querySelector('main');
-            
+
             if (!container) {
                 console.log('[Observer] No container found, retrying...');
                 setTimeout(setupObserver, 1000);
                 return;
             }
-            
-            // Disconnect previous observer if exists
+
             if (window.__discordMutationObserver) {
                 try { window.__discordMutationObserver.disconnect(); } catch (e) {}
             }
 
             const observer = new MutationObserver((mutations) => {
+                state.lastMutationAt = Date.now();
                 for (const mutation of mutations) {
                     if (mutation.addedNodes.length > 0) {
                         processNewMessages(mutation.addedNodes);
                     }
                 }
             });
-            
-            observer.observe(container, {
-                childList: true,
-                subtree: true
-            });
 
+            observer.observe(container, { childList: true, subtree: true });
             window.__discordMutationObserver = observer;
             console.log('[Observer] MutationObserver active on', container.className);
         }
-        
-        // Scroll to bottom to see latest messages
+
         function scrollToBottom() {
             const scroller = document.querySelector('[class*="messagesWrapper-"]');
-            if (scroller) {
-                scroller.scrollTop = scroller.scrollHeight;
-            }
+            if (scroller) scroller.scrollTop = scroller.scrollHeight;
         }
-        
-        // Wait for messages then initialize
+
         function waitForInitialMessages(attempt = 0) {
-            const messages = document.querySelectorAll('[id^="chat-messages-"], [data-list-item-id^="chat-messages-"]');
+            const messages = document.querySelectorAll(MSG_SELECTOR);
             if (messages.length > 0) {
-                initializeSeenMessages();
+                initialize();
                 setupObserver();
                 return;
             }
-            if (attempt >= 30) {
+            if (attempt >= 40) {
                 console.log('[Observer] No messages found; starting observer anyway');
                 state.isInitialized = true;
                 setupObserver();
                 return;
             }
-            setTimeout(() => waitForInitialMessages(attempt + 1), 200);
+            setTimeout(() => waitForInitialMessages(attempt + 1), 250);
         }
-        
+
+        function startPrimingLoop() {
+            if (window.__discordPrimeInterval) return;
+            window.__discordPrimeInterval = setInterval(() => {
+                // Keep refreshing our candidate max from visible messages
+                scanVisibleMessagesAndMaxSnowflake();
+
+                if (state.isPrimed) return;
+
+                const quietForMs = Date.now() - (state.lastMutationAt || Date.now());
+                // Once Discord stops hydrating old history for a moment, lock the baseline.
+                if (quietForMs > 2500) {
+                    state.baselineSnowflake = state.candidateMaxSnowflake || 0n;
+                    state.isPrimed = true;
+                    console.log('[Observer] Primed baseline snowflake:', state.baselineSnowflake.toString(), '- will ignore anything older/equal forever');
+                }
+            }, 500);
+        }
+
         // Start
         setTimeout(() => {
             scrollToBottom();
-            setTimeout(() => waitForInitialMessages(), 500);
-        }, 500);
+            setTimeout(() => {
+                waitForInitialMessages();
+                startPrimingLoop();
+            }, 800);
+        }, 800);
     })();
     """
     
