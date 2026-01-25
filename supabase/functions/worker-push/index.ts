@@ -86,15 +86,8 @@ Deno.serve(async (req) => {
           .limit(1);
 
         if (existingRows && existingRows.length > 0) {
-          // Even if duplicate, advance cursor so the watcher can stop re-sending history.
-          await supabase
-            .from("discord_channels")
-            .update({
-              last_message_fingerprint: fingerprint,
-              last_message_at: new Date().toISOString(),
-            })
-            .eq("id", channel_id);
-
+          // Duplicate detected - do NOT update cursor to avoid resetting to old fingerprints
+          // The worker's MutationObserver should filter these via its baseline lock
           return new Response(
             JSON.stringify({ success: true, duplicate: true }),
             { headers: { ...corsHeaders, "Content-Type": "application/json" } }

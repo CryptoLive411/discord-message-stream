@@ -204,8 +204,8 @@ class APIClient:
             logger.error(f"Failed to send heartbeat: {e}")
             return False
     
-    async def push_message(self, channel_id: str, message_data: dict) -> bool:
-        """Push a new message to the queue."""
+    async def push_message(self, channel_id: str, message_data: dict) -> dict:
+        """Push a new message to the queue. Returns dict with 'success', 'duplicate', 'skipped' keys."""
         try:
             response = await self.client.post(
                 f"{self.base_url}/worker-push",
@@ -219,10 +219,15 @@ class APIClient:
                 }
             )
             response.raise_for_status()
-            return True
+            result = response.json()
+            return {
+                'success': result.get('success', False),
+                'duplicate': result.get('duplicate', False),
+                'skipped': result.get('skipped', False),
+            }
         except Exception as e:
             logger.error(f"Failed to push message: {e}")
-            return False
+            return {'success': False, 'duplicate': False, 'skipped': False}
     
     async def mark_sent(self, message_id: str) -> bool:
         """Mark a message as successfully sent."""
@@ -779,7 +784,7 @@ class ChannelTab:
             logger.info(f"[{self.channel_name}] New message from {author}: {raw_text[:50] if raw_text else '[attachment]'}...")
             
             # Push to queue immediately
-            success = await self.api.push_message(self.channel_id, {
+            result = await self.api.push_message(self.channel_id, {
                 'fingerprint': fingerprint,
                 'discord_message_id': msg['message_id'],
                 'author_name': author,
@@ -787,10 +792,17 @@ class ChannelTab:
                 'attachment_urls': msg['attachments']
             })
             
-            if success:
-                await self.api.log('success', "Queued message", self.channel_name, f"From: {author} | Content: {raw_text[:80] if raw_text else '[attachment]'}")
-                # Update cursor
-                await self.api.set_channel_cursor(self.channel_id, fingerprint, msg.get('timestamp'))
+            if result['success']:
+                if result['duplicate']:
+                    logger.debug(f"[{self.channel_name}] Duplicate message, skipping: {fingerprint[:8]}...")
+                    # Do NOT update cursor for duplicates - this prevents resetting to old fingerprints
+                elif result['skipped']:
+                    logger.info(f"[{self.channel_name}] Message skipped by parser (noise)")
+                    await self.api.set_channel_cursor(self.channel_id, fingerprint, msg.get('timestamp'))
+                else:
+                    await self.api.log('success', "Queued message", self.channel_name, f"From: {author} | Content: {raw_text[:80] if raw_text else '[attachment]'}")
+                    # Only update cursor for genuinely new messages
+                    await self.api.set_channel_cursor(self.channel_id, fingerprint, msg.get('timestamp'))
             
             # Notify main relay
             if self.on_message_callback:
