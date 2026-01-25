@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { Layout } from '@/components/layout/Layout';
 import { ChannelList } from '@/components/dashboard/ChannelList';
 import { useChannels, useAddChannel, useUpdateChannel } from '@/hooks/useChannels';
+import { EditMappingDialog } from '@/components/channels/EditMappingDialog';
+import { DiscordChannel } from '@/types';
 import { useTelegramConfig } from '@/hooks/useTelegramConfig';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -46,6 +48,8 @@ export default function Channels() {
   const [mirrorAttachments, setMirrorAttachments] = useState(true);
   const [mirrorReplies, setMirrorReplies] = useState(true);
   const [topicName, setTopicName] = useState('');
+  const [editingChannel, setEditingChannel] = useState<DiscordChannel | null>(null);
+  const [isEditMappingOpen, setIsEditMappingOpen] = useState(false);
 
   const { data: channels = [], isLoading: channelsLoading } = useChannels();
   const { data: telegramConfig } = useTelegramConfig();
@@ -54,6 +58,19 @@ export default function Channels() {
 
   const handleToggleEnabled = (id: string, enabled: boolean) => {
     updateChannel.mutate({ id, enabled });
+  };
+
+  const handleEditMapping = (channel: DiscordChannel) => {
+    setEditingChannel(channel);
+    setIsEditMappingOpen(true);
+  };
+
+  const handleSaveMapping = async (id: string, topicId: string, topicName: string) => {
+    await updateChannel.mutateAsync({
+      id,
+      telegramTopicId: topicId || undefined,
+      telegramTopicName: topicName || undefined,
+    });
   };
 
   const filteredChannels = channels.filter((channel) => {
@@ -296,8 +313,21 @@ export default function Channels() {
             )}
           </div>
         ) : (
-          <ChannelList channels={filteredChannels} onToggleEnabled={handleToggleEnabled} />
+          <ChannelList 
+            channels={filteredChannels} 
+            onToggleEnabled={handleToggleEnabled}
+            onEditMapping={handleEditMapping}
+          />
         )}
+
+        {/* Edit Mapping Dialog */}
+        <EditMappingDialog
+          channel={editingChannel}
+          open={isEditMappingOpen}
+          onOpenChange={setIsEditMappingOpen}
+          onSave={handleSaveMapping}
+          isPending={updateChannel.isPending}
+        />
       </div>
     </Layout>
   );
