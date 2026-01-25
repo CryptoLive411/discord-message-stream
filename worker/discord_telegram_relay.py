@@ -403,7 +403,11 @@ class ChannelTab:
         }
 
         function getMessageNodes(root = document) {
-            return root.querySelectorAll('[id^="chat-messages-"], [data-list-item-id^="chat-messages-"]');
+            // Discord has used several variants over time:
+            // - id="chat-messages-<channelId>-<snowflake>"
+            // - data-list-item-id="chat-messages___<snowflake>" (and other underscore forms)
+            // So we match the stable prefix "chat-messages" instead of requiring a dash.
+            return root.querySelectorAll('[id^="chat-messages-"], [data-list-item-id^="chat-messages"]');
         }
 
         // During priming, we record all IDs we see and continuously advance the
@@ -557,8 +561,8 @@ class ChannelTab:
                 if (node.nodeType !== 1) return;
                 
                 // Check if this is a message element
-                const isMessage = node.id?.startsWith('chat-messages-') || 
-                                  node.getAttribute?.('data-list-item-id')?.startsWith('chat-messages-');
+                const isMessage = node.id?.startsWith('chat-messages-') ||
+                                  node.getAttribute?.('data-list-item-id')?.startsWith('chat-messages');
                 
                 if (isMessage) {
                     if (!state.baselineLocked) {
@@ -575,7 +579,7 @@ class ChannelTab:
                 
                 // Also check children (for batch insertions)
                 if (node.querySelectorAll) {
-                    const childMessages = node.querySelectorAll('[id^="chat-messages-"], [data-list-item-id^="chat-messages-"]');
+                    const childMessages = node.querySelectorAll('[id^="chat-messages-"], [data-list-item-id^="chat-messages"]');
                     childMessages.forEach(child => {
                         if (!state.baselineLocked) {
                             noteSeenMessageElement(child);
