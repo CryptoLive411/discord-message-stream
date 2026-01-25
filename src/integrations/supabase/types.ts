@@ -174,28 +174,64 @@ export type Database = {
       }
       relay_logs: {
         Row: {
+          author_name: string | null
           channel_name: string | null
           created_at: string
           details: string | null
+          formatted_text: string | null
           id: string
           level: string
           message: string
+          metadata: Json | null
+          original_text: string | null
+          signal_type: string | null
         }
         Insert: {
+          author_name?: string | null
           channel_name?: string | null
           created_at?: string
           details?: string | null
+          formatted_text?: string | null
           id?: string
           level: string
           message: string
+          metadata?: Json | null
+          original_text?: string | null
+          signal_type?: string | null
         }
         Update: {
+          author_name?: string | null
           channel_name?: string | null
           created_at?: string
           details?: string | null
+          formatted_text?: string | null
           id?: string
           level?: string
           message?: string
+          metadata?: Json | null
+          original_text?: string | null
+          signal_type?: string | null
+        }
+        Relationships: []
+      }
+      relay_settings: {
+        Row: {
+          id: string
+          setting_key: string
+          setting_value: Json
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          setting_key: string
+          setting_value?: Json
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          setting_key?: string
+          setting_value?: Json
+          updated_at?: string
         }
         Relationships: []
       }
