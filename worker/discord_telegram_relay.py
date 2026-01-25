@@ -141,21 +141,6 @@ class APIClient:
             logger.error(f"Failed to fetch Telegram config: {e}")
             return None
     
-    async def get_tracked_authors(self) -> list[str]:
-        """Fetch global whitelist of tracked Discord usernames."""
-        try:
-            response = await self.client.get(
-                f"{self.base_url}/worker-pull",
-                params={"action": "get_tracked_authors"},
-                headers=self.headers
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data.get('authors', [])
-        except Exception as e:
-            logger.error(f"Failed to fetch tracked authors: {e}")
-            return []
-    
     async def get_banned_authors(self) -> list[str]:
         """Fetch global blacklist of banned Discord usernames."""
         try:
@@ -748,12 +733,11 @@ class ChannelTab:
     })();
     """
     
-    def __init__(self, channel: dict, context: BrowserContext, api: APIClient, on_message_callback, get_tracked_authors_func, get_banned_authors_func):
+    def __init__(self, channel: dict, context: BrowserContext, api: APIClient, on_message_callback, get_banned_authors_func):
         self.channel = channel
         self.context = context
         self.api = api
         self.on_message_callback = on_message_callback
-        self.get_tracked_authors = get_tracked_authors_func  # Function to get current whitelist
         self.get_banned_authors = get_banned_authors_func    # Function to get current blacklist
         self.page: Optional[Page] = None
         self.running = False
@@ -772,24 +756,12 @@ class ChannelTab:
             msg = json.loads(message_json)
             author = (msg.get('author') or '').strip()
             
-            # Check banned authors blacklist FIRST (takes priority)
+            # Check banned authors blacklist
             banned = self.get_banned_authors()
             if banned:
                 banned_lower = [a.lower() for a in banned]
                 if author.lower() in banned_lower:
-                    logger.debug(f"[{self.channel_name}] Skipping message from banned author: {author}")
-                    return
-            
-            # Check author whitelist filter
-            tracked = self.get_tracked_authors()
-            if tracked:  # If whitelist is non-empty, filter
-                # Case-insensitive comparison
-                tracked_lower = [a.lower() for a in tracked]
-                # Allow "Unknown" authors through when whitelist is active
-                # (we can't filter what we can't identify)
-                if author.lower() != 'unknown' and author.lower() not in tracked_lower:
-                    logger.info(f"[{self.channel_name}] Skipping message from non-tracked author: {author}")
-                    await self.api.log('info', f"Skipped non-whitelisted author: {author}", self.channel_name)
+                    logger.info(f"[{self.channel_name}] Skipping message from banned author: {author}")
                     return
             
             fingerprint = self._generate_fingerprint(msg['message_id'])
@@ -928,7 +900,6 @@ class DiscordWatcher:
         self.tabs: dict[str, ChannelTab] = {}  # channel_id -> ChannelTab
         self.running = False
         self.message_queue = asyncio.Queue()
-        self.tracked_authors: list[str] = []  # Global whitelist (empty = all messages)
         self.banned_authors: list[str] = []   # Global blacklist (always skip)
         self._keepalive_page: Optional[Page] = None  # Keep browser context alive
     
@@ -998,7 +969,7 @@ class DiscordWatcher:
         new_channels = [(cid, channel) for cid, channel in enabled_channels.items() if cid not in self.tabs]
         for i, (cid, channel) in enumerate(new_channels):
             logger.info(f"Opening tab for new channel: {channel['name']}")
-            tab = ChannelTab(channel, self.context, self.api, self._on_message, self._get_tracked_authors, self._get_banned_authors)
+            tab = ChannelTab(channel, self.context, self.api, self._on_message, self._get_banned_authors)
             self.tabs[cid] = tab
             # Start tab in background with staggered delay
             asyncio.create_task(self._start_tab_with_delay(tab, i * 0.5))
@@ -1014,25 +985,13 @@ class DiscordWatcher:
         except Exception as e:
             logger.error(f"[{tab.channel_name}] Failed to start tab: {e}")
     
-    async def _refresh_tracked_authors(self):
-        """Fetch latest tracked authors whitelist and banned authors blacklist."""
-        # Refresh whitelist
-        authors = await self.api.get_tracked_authors()
-        if authors != self.tracked_authors:
-            logger.info(f"Tracked authors updated: {authors if authors else '(all messages)'}")
-            await self.api.log('info', f"Author whitelist updated: {len(authors)} users" if authors else "Author whitelist cleared (tracking all)")
-        self.tracked_authors = authors
-        
-        # Refresh blacklist
+    async def _refresh_banned_authors(self):
+        """Fetch latest banned authors blacklist."""
         banned = await self.api.get_banned_authors()
         if banned != self.banned_authors:
             logger.info(f"Banned authors updated: {banned if banned else '(none)'}")
             await self.api.log('info', f"Author blacklist updated: {len(banned)} users" if banned else "Author blacklist cleared")
         self.banned_authors = banned
-    
-    def _get_tracked_authors(self) -> list[str]:
-        """Return current tracked authors list (used by ChannelTab)."""
-        return self.tracked_authors
     
     def _get_banned_authors(self) -> list[str]:
         """Return current banned authors list (used by ChannelTab)."""
@@ -1040,8 +999,8 @@ class DiscordWatcher:
     
     async def watch_channels(self):
         """Main loop to manage channel tabs."""
-        # Fetch initial tracked authors
-        await self._refresh_tracked_authors()
+        # Fetch initial banned authors
+        await self._refresh_banned_authors()
         
         # Initial sync
         count = await self._sync_tabs()
@@ -1051,7 +1010,7 @@ class DiscordWatcher:
         while self.running:
             try:
                 await asyncio.sleep(self.config.channel_refresh_interval)
-                await self._refresh_tracked_authors()
+                await self._refresh_banned_authors()
                 count = await self._sync_tabs()
                 await self.api.update_connection_status('discord', 'connected')
                 logger.debug(f"Channel sync complete: {count} tabs active")
