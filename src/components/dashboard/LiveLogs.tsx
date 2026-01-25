@@ -80,8 +80,8 @@ export function LiveLogs({ logs, maxHeight = '400px', showFilters = false }: Liv
   return (
     <div
       ref={containerRef}
-      className="bg-sidebar rounded-lg border border-border overflow-hidden scrollbar-thin"
-      style={{ maxHeight }}
+      className="bg-sidebar rounded-lg border border-border overflow-y-auto scrollbar-thin"
+      style={{ maxHeight, overflowY: 'auto' }}
     >
       <div className="sticky top-0 bg-sidebar/95 backdrop-blur-sm px-3 py-2 border-b border-border flex items-center justify-between">
         <div className="flex items-center gap-2">
