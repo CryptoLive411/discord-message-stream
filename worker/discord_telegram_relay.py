@@ -280,6 +280,7 @@ class ChannelTab:
             baselineSnowflake: 0n,
             baselineLocked: false,
             warmupUntil: Date.now() + 4000,
+            startupAtMs: Date.now(),
             lastDomChangeAt: Date.now(),
             quietPeriodMs: 2500,
         });
@@ -291,9 +292,13 @@ class ChannelTab:
             state.baselineSnowflake = 0n;
             state.baselineLocked = false;
             state.warmupUntil = Date.now() + 4000;
+            state.startupAtMs = Date.now();
             state.lastDomChangeAt = Date.now();
             console.log('[Observer] Channel changed, state reset:', channelKey);
         }
+
+        // Helpful for debugging from the Python side: proves this script version is running.
+        console.log('[Observer] Script loaded. startupAtMs=', state.startupAtMs);
         
         function parseSnowflakeFromMessageId(id) {
             // Examples we may see:
@@ -362,6 +367,22 @@ class ChannelTab:
             }
             
             state.seenMessages.add(id);
+
+            // Time-based backfill prevention (more reliable than DOM IDs alone):
+            // if Discord inserts older messages after startup, ignore them.
+            const timeEl = element.querySelector?.('time[datetime]');
+            if (timeEl) {
+                const dt = timeEl.getAttribute('datetime');
+                if (dt) {
+                    const ts = Date.parse(dt);
+                    if (!Number.isNaN(ts)) {
+                        // 15s tolerance for clock skew / rendering delays
+                        if (ts < (state.startupAtMs - 15000)) {
+                            return null;
+                        }
+                    }
+                }
+            }
 
             // Hard backfill prevention: ignore any message older/equal to the
             // newest snowflake observed during priming.
@@ -627,6 +648,18 @@ class ChannelTab:
         try:
             self.page = await self.context.new_page()
             self.running = True
+
+            # Forward page console logs into worker logs (debugging baseline lock / hydration)
+            def _on_console(msg):
+                try:
+                    logger.info(f"[{self.channel_name}] [page] {msg.type}: {msg.text}")
+                except Exception:
+                    pass
+
+            try:
+                self.page.on("console", _on_console)
+            except Exception:
+                pass
             
             # Expose Python callback to JavaScript
             await self.page.expose_function('__onNewMessage', self._handle_new_message)
@@ -643,6 +676,24 @@ class ChannelTab:
             
             # Inject the observer script
             await self.page.evaluate(self.OBSERVER_SCRIPT)
+
+            # Dump current observer state after a short delay so we can confirm baseline status.
+            try:
+                await asyncio.sleep(3)
+                obs_state = await self.page.evaluate("""() => {
+                  const s = window.__discordObserverState;
+                  if (!s) return null;
+                  return {
+                    channelKey: s.channelKey,
+                    baselineLocked: s.baselineLocked,
+                    baselineSnowflake: (s.baselineSnowflake && s.baselineSnowflake.toString) ? s.baselineSnowflake.toString() : null,
+                    startupAtMs: s.startupAtMs,
+                    seenCount: s.seenMessages ? s.seenMessages.size : null,
+                  };
+                }""")
+                logger.info(f"[{self.channel_name}] Observer state: {obs_state}")
+            except Exception as e:
+                logger.debug(f"[{self.channel_name}] Could not read observer state: {e}")
             
             await self.api.log('success', f"Channel tab opened with real-time observer", self.channel_name)
             logger.info(f"[{self.channel_name}] MutationObserver active - watching for new messages")
