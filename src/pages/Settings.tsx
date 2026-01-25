@@ -14,7 +14,6 @@ import {
 import { Separator } from '@/components/ui/separator';
 import { DiscordIcon } from '@/components/icons/DiscordIcon';
 import { TelegramIcon } from '@/components/icons/TelegramIcon';
-import { TrackedAuthorsSection } from '@/components/settings/TrackedAuthorsSection';
 import { BannedAuthorsSection } from '@/components/settings/BannedAuthorsSection';
 import { Save, Key, RefreshCw, Shield, Clock, Zap } from 'lucide-react';
 import { useState } from 'react';
@@ -165,9 +164,6 @@ export default function Settings() {
             </Button>
           </div>
         </div>
-
-        {/* Tracked Authors Whitelist */}
-        <TrackedAuthorsSection />
 
         {/* Banned Authors Blacklist */}
         <BannedAuthorsSection />

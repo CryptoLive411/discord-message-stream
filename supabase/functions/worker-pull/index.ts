@@ -128,24 +128,6 @@ Deno.serve(async (req) => {
         );
       }
 
-      case "get_tracked_authors": {
-        // Get global whitelist of authors to track
-        const { data: authors, error } = await supabase
-          .from("tracked_authors")
-          .select("username")
-          .order("username");
-
-        if (error) throw error;
-
-        // Return just the usernames as an array
-        const usernames = authors?.map(a => a.username) || [];
-
-        return new Response(
-          JSON.stringify({ authors: usernames }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      }
-
       case "get_banned_authors": {
         // Get global blacklist of authors to ban
         const { data: authors, error } = await supabase
