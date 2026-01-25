@@ -514,7 +514,8 @@ class ChannelTab:
                 }
             }
             
-            // Extract content
+            // Extract content - but EXCLUDE reply preview blocks
+            // Discord wraps quoted/reply content in elements with these classes
             let content = '';
             const contentSelectors = [
                 '[id^="message-content-"]',
@@ -523,9 +524,27 @@ class ChannelTab:
             for (const sel of contentSelectors) {
                 const el = element.querySelector(sel);
                 if (el && el.innerText && el.innerText.trim()) {
+                    // Check if this content element is inside a reply/quote preview
+                    const isInReplyPreview = el.closest('[class*="repliedMessage"]') ||
+                                              el.closest('[class*="repliedTextPreview"]') ||
+                                              el.closest('[class*="repliedTextContent"]') ||
+                                              el.closest('[class*="replyBar"]') ||
+                                              el.closest('[class*="clickable-"][class*="message-"]'); // reply click area
+                    if (isInReplyPreview) {
+                        // Skip reply preview content, look for main content instead
+                        continue;
+                    }
                     content = el.innerText.trim();
                     break;
                 }
+            }
+            
+            // Also detect if the entire message is just a reply reference (no actual new content)
+            const hasReplyPreview = element.querySelector('[class*="repliedMessage"]') ||
+                                    element.querySelector('[class*="repliedTextPreview"]');
+            if (hasReplyPreview && !content) {
+                // This message only contains a reply reference with no new text
+                return null;
             }
 
             // Note: we intentionally do NOT try to strip author prefixes here with regex,
