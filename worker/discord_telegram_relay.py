@@ -3,13 +3,12 @@
 Discord to Telegram Mirror Relay Worker
 ========================================
 Watches Discord channels via browser automation (Playwright) using MutationObserver
-for real-time message detection, and relays messages to Telegram via Bot API.
+for real-time message detection, and relays messages to Telegram via MTProto (Telethon).
 
 Architecture:
 - Opens one browser tab per Discord channel
 - Injects MutationObserver to detect new messages instantly (<100ms)
 - No polling — event-driven message detection
-- Uses Telegram Bot API (not user account) to avoid bans
 
 Run with: python discord_telegram_relay.py
 """
@@ -29,6 +28,8 @@ from typing import Optional
 import httpx
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright, Browser, Page, BrowserContext
+from telethon import TelegramClient
+from telethon.tl.types import InputPeerChannel, InputPeerChat
 
 # Load environment variables
 load_dotenv()
@@ -53,7 +54,9 @@ class Config:
     """Application configuration from environment variables."""
     worker_api_key: str
     supabase_url: str
-    telegram_bot_token: str
+    telegram_api_id: int
+    telegram_api_hash: str
+    telegram_session_name: str = "discord_mirror_session"
     channel_refresh_interval: int = 60  # seconds between checking for new/removed channels
     headless: bool = True   # Run browser in headless mode
     browser_profile_path: str = "./discord_profile"
@@ -61,7 +64,7 @@ class Config:
     @classmethod
     def from_env(cls) -> 'Config':
         """Load configuration from environment variables."""
-        required = ['WORKER_API_KEY', 'SUPABASE_URL', 'TELEGRAM_BOT_TOKEN']
+        required = ['WORKER_API_KEY', 'SUPABASE_URL', 'TELEGRAM_API_ID', 'TELEGRAM_API_HASH']
         missing = [key for key in required if not os.getenv(key)]
         if missing:
             raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
@@ -69,7 +72,9 @@ class Config:
         return cls(
             worker_api_key=os.getenv('WORKER_API_KEY'),
             supabase_url=os.getenv('SUPABASE_URL'),
-            telegram_bot_token=os.getenv('TELEGRAM_BOT_TOKEN'),
+            telegram_api_id=int(os.getenv('TELEGRAM_API_ID')),
+            telegram_api_hash=os.getenv('TELEGRAM_API_HASH'),
+            telegram_session_name=os.getenv('TELEGRAM_SESSION_NAME', 'discord_mirror_session'),
             channel_refresh_interval=int(os.getenv('CHANNEL_REFRESH_INTERVAL', '60')),
             headless=os.getenv('HEADLESS', 'true').lower() == 'true',
             browser_profile_path=os.getenv('BROWSER_PROFILE_PATH', './discord_profile'),
@@ -266,84 +271,90 @@ class ChannelTab:
     """Manages a single browser tab watching one Discord channel."""
     
     # JavaScript to inject for real-time message detection
-    # Robust anti-backfill:
-    # 1) Scroll to bottom
-    # 2) Wait for chat to stabilize
-    # 3) Capture the newest visible snowflake as a baseline
-    # 4) Only forward messages with snowflake > baseline forever
     OBSERVER_SCRIPT = """
     (function() {
-        const MSG_SELECTOR = '[id^="chat-messages-"], [data-list-item-id^="chat-messages-"]';
-
-        if (!window.__discordObserverState) {
-            window.__discordObserverState = {
-                seenMessages: new Set(),
-                isInitialized: false,
-                isPrimed: false,
-                baselineSnowflake: 0n,
-                candidateMaxSnowflake: 0n,
-                lastMutationAt: Date.now(),
-            };
-            console.log('[Observer] State created');
-        }
-
-        const state = window.__discordObserverState;
-        const seenMessages = state.seenMessages;
-
+        // Avoid double-injection
+        if (window.__discordObserverActive) return;
+        window.__discordObserverActive = true;
+        
+        const seenMessages = new Set();
+        let lastProcessedId = null;
+        // Track the newest (max) Discord snowflake we see at init time.
+        // Anything older/equal is treated as history/backfill and ignored.
+        let initialMaxSnowflake = 0n;
+        let hasInitialMaxSnowflake = false;
+        // Warmup window: Discord hydrates existing messages after navigation.
+        // During this time, we record IDs but do NOT forward anything.
+        let warmupUntil = Date.now() + 4000;
+        
         function parseSnowflakeFromMessageId(id) {
+            // Examples we may see:
+            // - "chat-messages-<channelId>-<messageSnowflake>"
+            // - data-list-item-id like "chat-messages___<messageSnowflake>" (varies)
             if (!id) return null;
-            const matches = id.match(/(\\d{16,20})/g);
+            const matches = id.match(/(\d{16,20})/g);
             if (!matches || matches.length === 0) return null;
+            // Take the last long numeric token as the message snowflake.
             const token = matches[matches.length - 1];
-            try { return BigInt(token); } catch { return null; }
+            try {
+                return BigInt(token);
+            } catch {
+                return null;
+            }
         }
 
         function isDiscordAttachmentUrl(url) {
             if (!url) return false;
-            return /https?:\\/\\/(cdn\\.discordapp\\.com|media\\.discordapp\\.net)\\/(attachments|ephemeral-attachments)\\//.test(url);
+            // Only accept real message attachments; exclude avatars, decorations, stickers, etc.
+            return /https?:\/\/(cdn\.discordapp\.com|media\.discordapp\.net)\/(attachments|ephemeral-attachments)\//.test(url);
         }
 
-        function scanVisibleMessagesAndMaxSnowflake() {
-            let max = state.candidateMaxSnowflake || 0n;
-            const messages = document.querySelectorAll(MSG_SELECTOR);
-            messages.forEach(el => {
-                const id = el.id || el.getAttribute('data-list-item-id');
-                if (id) {
-                    seenMessages.add(id);
-                    const sf = parseSnowflakeFromMessageId(id);
-                    if (sf !== null && sf > max) max = sf;
+        // Initialize with existing messages to avoid backfill
+        function initializeSeenMessages() {
+            const messages = document.querySelectorAll('[id^="chat-messages-"], [data-list-item-id^="chat-messages-"]');
+            messages.forEach(msg => {
+                const id = msg.id || msg.getAttribute('data-list-item-id');
+                if (id) seenMessages.add(id);
+
+                const snowflake = parseSnowflakeFromMessageId(id);
+                if (snowflake !== null) {
+                    if (!hasInitialMaxSnowflake || snowflake > initialMaxSnowflake) {
+                        initialMaxSnowflake = snowflake;
+                        hasInitialMaxSnowflake = true;
+                    }
                 }
             });
-            state.candidateMaxSnowflake = max;
-            return max;
+            if (messages.length > 0) {
+                lastProcessedId = messages[messages.length - 1].id;
+            }
+            console.log('[Observer] Initialized with', seenMessages.size, 'existing messages', hasInitialMaxSnowflake ? `(initialMax=${initialMaxSnowflake.toString()})` : '(no snowflake parsed)');
         }
-
-        function initialize() {
-            if (state.isInitialized) return;
-            // Mark anything currently visible as seen immediately
-            scanVisibleMessagesAndMaxSnowflake();
-            state.isInitialized = true;
-            console.log('[Observer] Initialized; waiting to prime baseline (no backfill)');
-        }
-
+        
+        // Extract message data from a DOM element
         function extractMessage(element) {
             const id = element.id || element.getAttribute('data-list-item-id');
             if (!id || seenMessages.has(id)) return null;
+            
             seenMessages.add(id);
 
-            const sf = parseSnowflakeFromMessageId(id);
-            if (!state.isPrimed) {
-                // During priming, NEVER forward anything; just learn the newest snowflake.
-                if (sf !== null && sf > state.candidateMaxSnowflake) state.candidateMaxSnowflake = sf;
+            // Hard backfill prevention: ignore any message older/equal to newest message at startup.
+            if (hasInitialMaxSnowflake) {
+                const snowflake = parseSnowflakeFromMessageId(id);
+                if (snowflake !== null && snowflake <= initialMaxSnowflake) {
+                    return null;
+                }
+                // If it is newer, advance our cursor so we keep moving forward.
+                if (snowflake !== null && snowflake > initialMaxSnowflake) {
+                    initialMaxSnowflake = snowflake;
+                }
+            }
+            
+            // Ignore anything that appears during initial hydration / warmup.
+            if (Date.now() < warmupUntil) {
+                console.log('[Observer] Skipping warmup message:', id);
                 return null;
             }
-
-            // After priming, enforce cursor.
-            if (sf !== null) {
-                if (sf <= state.baselineSnowflake) return null;
-                state.baselineSnowflake = sf;
-            }
-
+            
             // Extract author
             let author = 'Unknown';
             const authorSelectors = [
@@ -355,11 +366,12 @@ class ChannelTab:
             for (const sel of authorSelectors) {
                 const el = element.querySelector(sel);
                 if (el && el.innerText && el.innerText.trim()) {
+                    // Get text content and strip emojis/special unicode chars (badges, diamonds, etc.)
                     author = el.innerText.trim().replace(/[\\u{1F300}-\\u{1F9FF}\\u{2600}-\\u{26FF}\\u{2700}-\\u{27BF}\\u{1F600}-\\u{1F64F}\\u{1F680}-\\u{1F6FF}\\u{1F1E0}-\\u{1F1FF}\\u{1FA00}-\\u{1FA6F}\\u{1FA70}-\\u{1FAFF}\\u{2300}-\\u{23FF}\\u{FE00}-\\u{FE0F}\\u{200D}]/gu, '').trim();
                     break;
                 }
             }
-
+            
             // Extract content
             let content = '';
             const contentSelectors = [
@@ -374,7 +386,7 @@ class ChannelTab:
                     break;
                 }
             }
-
+            
             // Extract attachments
             const attachments = [];
             element.querySelectorAll('a[href]').forEach(a => {
@@ -385,110 +397,110 @@ class ChannelTab:
                 const url = img.src;
                 if (isDiscordAttachmentUrl(url) && !attachments.includes(url)) attachments.push(url);
             });
-
+            
+            // Skip empty messages
             if (!content && attachments.length === 0) return null;
-
+            
             return {
                 message_id: id,
                 author: author,
                 content: content,
                 attachments: attachments,
-                timestamp: new Date().toISOString(),
+                timestamp: new Date().toISOString()
             };
         }
-
+        
+        // Process new message nodes
         function processNewMessages(nodes) {
             nodes.forEach(node => {
                 if (node.nodeType !== 1) return;
-                const candidates = [];
-                if (node.matches?.(MSG_SELECTOR)) candidates.push(node);
-                if (node.querySelectorAll) node.querySelectorAll(MSG_SELECTOR).forEach(el => candidates.push(el));
-                candidates.forEach(el => {
-                    const msg = extractMessage(el);
+                
+                // Check if this is a message element
+                const isMessage = node.id?.startsWith('chat-messages-') || 
+                                  node.getAttribute?.('data-list-item-id')?.startsWith('chat-messages-');
+                
+                if (isMessage) {
+                    const msg = extractMessage(node);
                     if (msg) {
-                        console.log('[Observer] Forwarding new message:', msg.author, msg.content?.substring(0, 50));
+                        console.log('[Observer] New message detected:', msg.author, msg.content?.substring(0, 50));
                         window.__onNewMessage(JSON.stringify(msg));
                     }
-                });
+                }
+                
+                // Also check children (for batch insertions)
+                if (node.querySelectorAll) {
+                    const childMessages = node.querySelectorAll('[id^="chat-messages-"]');
+                    childMessages.forEach(child => {
+                        const msg = extractMessage(child);
+                        if (msg) {
+                            console.log('[Observer] New message detected (child):', msg.author);
+                            window.__onNewMessage(JSON.stringify(msg));
+                        }
+                    });
+                }
             });
         }
-
+        
+        // Set up MutationObserver
         function setupObserver() {
+            // Find the messages container
             const container = document.querySelector('[class*="messagesWrapper-"]') ||
                               document.querySelector('[class*="scrollerInner-"]') ||
                               document.querySelector('main');
-
+            
             if (!container) {
                 console.log('[Observer] No container found, retrying...');
                 setTimeout(setupObserver, 1000);
                 return;
             }
-
-            if (window.__discordMutationObserver) {
-                try { window.__discordMutationObserver.disconnect(); } catch (e) {}
-            }
-
+            
             const observer = new MutationObserver((mutations) => {
-                state.lastMutationAt = Date.now();
                 for (const mutation of mutations) {
                     if (mutation.addedNodes.length > 0) {
                         processNewMessages(mutation.addedNodes);
                     }
                 }
             });
-
-            observer.observe(container, { childList: true, subtree: true });
-            window.__discordMutationObserver = observer;
+            
+            observer.observe(container, {
+                childList: true,
+                subtree: true
+            });
+            
             console.log('[Observer] MutationObserver active on', container.className);
         }
-
+        
+        // Scroll to bottom to ensure we see latest messages
         function scrollToBottom() {
             const scroller = document.querySelector('[class*="messagesWrapper-"]');
-            if (scroller) scroller.scrollTop = scroller.scrollHeight;
+            if (scroller) {
+                scroller.scrollTop = scroller.scrollHeight;
+            }
         }
-
+        
+        // Wait for messages to appear before initializing
         function waitForInitialMessages(attempt = 0) {
-            const messages = document.querySelectorAll(MSG_SELECTOR);
+            const messages = document.querySelectorAll('[id^="chat-messages-"], [data-list-item-id^="chat-messages-"]');
             if (messages.length > 0) {
-                initialize();
+                initializeSeenMessages();
                 setupObserver();
                 return;
             }
-            if (attempt >= 40) {
-                console.log('[Observer] No messages found; starting observer anyway');
-                state.isInitialized = true;
+            if (attempt >= 30) {
+                console.log('[Observer] No messages found after wait; starting observer anyway');
                 setupObserver();
                 return;
             }
-            setTimeout(() => waitForInitialMessages(attempt + 1), 250);
+            setTimeout(() => waitForInitialMessages(attempt + 1), 200);
         }
-
-        function startPrimingLoop() {
-            if (window.__discordPrimeInterval) return;
-            window.__discordPrimeInterval = setInterval(() => {
-                // Keep refreshing our candidate max from visible messages
-                scanVisibleMessagesAndMaxSnowflake();
-
-                if (state.isPrimed) return;
-
-                const quietForMs = Date.now() - (state.lastMutationAt || Date.now());
-                // Once Discord stops hydrating old history for a moment, lock the baseline.
-                if (quietForMs > 2500) {
-                    state.baselineSnowflake = state.candidateMaxSnowflake || 0n;
-                    state.isPrimed = true;
-                    console.log('[Observer] Primed baseline snowflake:', state.baselineSnowflake.toString(), '- will ignore anything older/equal forever');
-                }
-            }, 500);
-        }
-
-        // Start
+        
+        // Initialize
         setTimeout(() => {
             scrollToBottom();
             setTimeout(() => {
                 waitForInitialMessages();
-                startPrimingLoop();
             }, 800);
-        }, 800);
+        }, 1000);
     })();
     """
     
@@ -700,48 +712,36 @@ class DiscordWatcher:
         logger.info("Discord watcher stopped")
 
 # ============================================================================
-# Telegram Sender (Bot API)
+# Telegram Sender (Telethon)
 # ============================================================================
 
 class TelegramSender:
-    """Sends messages to Telegram using Bot API."""
+    """Sends messages to Telegram using Telethon (MTProto)."""
     
     def __init__(self, config: Config, api: APIClient):
         self.config = config
         self.api = api
-        self.http_client: Optional[httpx.AsyncClient] = None
+        self.client: Optional[TelegramClient] = None
         self.running = False
-        self.bot_api_url = f"https://api.telegram.org/bot{config.telegram_bot_token}"
-        self.bot_info = None
+        self.destination = None
     
     async def start(self):
-        """Start the Telegram bot client."""
-        logger.info("Starting Telegram sender (Bot API mode)...")
+        """Start the Telegram client and authenticate."""
+        logger.info("Starting Telegram sender...")
         
-        self.http_client = httpx.AsyncClient(timeout=30.0)
+        self.client = TelegramClient(
+            self.config.telegram_session_name,
+            self.config.telegram_api_id,
+            self.config.telegram_api_hash
+        )
         
-        # Verify bot token by getting bot info
-        try:
-            response = await self.http_client.get(f"{self.bot_api_url}/getMe")
-            response.raise_for_status()
-            data = response.json()
-            
-            if not data.get('ok'):
-                raise ValueError(f"Bot API error: {data.get('description', 'Unknown error')}")
-            
-            self.bot_info = data['result']
-            bot_name = self.bot_info.get('first_name', 'Unknown')
-            bot_username = self.bot_info.get('username', 'unknown')
-            
-            logger.info(f"Logged in as bot: {bot_name} (@{bot_username})")
-            
-            await self.api.update_connection_status('telegram', 'connected')
-            await self.api.log('info', f'Telegram bot connected as @{bot_username}')
-            
-        except Exception as e:
-            logger.error(f"Failed to connect to Telegram Bot API: {e}")
-            await self.api.update_connection_status('telegram', 'error', str(e))
-            raise
+        await self.client.start()
+        
+        me = await self.client.get_me()
+        logger.info(f"Logged in to Telegram as: {me.first_name} (@{me.username})")
+        
+        await self.api.update_connection_status('telegram', 'connected')
+        await self.api.log('info', f'Telegram connected as {me.first_name}')
         
         self.running = True
         logger.info("Telegram sender ready!")
@@ -754,96 +754,30 @@ class TelegramSender:
             return None
         
         identifier = config.get('identifier')
+        dest_type = config.get('destination_type')
         use_topics = config.get('use_topics', False)
         
-        # For Bot API, we just need the chat_id (group/channel ID)
-        # It can be @username or numeric ID (negative for groups/channels)
-        chat_id = identifier
-        
-        return {
-            'chat_id': chat_id,
-            'use_topics': use_topics,
-            'config': config
-        }
+        try:
+            # Parse the identifier (can be username, group ID, or channel ID)
+            if identifier.startswith('@'):
+                entity = await self.client.get_entity(identifier)
+            elif identifier.startswith('-100'):
+                entity = await self.client.get_entity(int(identifier))
+            else:
+                entity = await self.client.get_entity(int(identifier))
+            
+            return {
+                'entity': entity,
+                'use_topics': use_topics,
+                'config': config
+            }
+        except Exception as e:
+            logger.error(f"Failed to resolve Telegram destination: {e}")
+            return None
     
     async def _format_message(self, msg: dict, channel_name: str) -> str:
         """Format a message for Telegram - text only, no username."""
         return (msg.get('message_text') or '').strip()
-    
-    async def _send_message(self, chat_id: str, text: str, message_thread_id: Optional[int] = None) -> bool:
-        """Send a text message via Bot API."""
-        try:
-            payload = {
-                'chat_id': chat_id,
-                'text': text,
-            }
-            if message_thread_id:
-                payload['message_thread_id'] = message_thread_id
-            
-            response = await self.http_client.post(
-                f"{self.bot_api_url}/sendMessage",
-                json=payload
-            )
-            data = response.json()
-            
-            if not data.get('ok'):
-                logger.error(f"Bot API sendMessage error: {data.get('description')}")
-                return False
-            
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send message: {e}")
-            return False
-    
-    async def _send_photo(self, chat_id: str, photo_url: str, message_thread_id: Optional[int] = None) -> bool:
-        """Send a photo via Bot API."""
-        try:
-            payload = {
-                'chat_id': chat_id,
-                'photo': photo_url,
-            }
-            if message_thread_id:
-                payload['message_thread_id'] = message_thread_id
-            
-            response = await self.http_client.post(
-                f"{self.bot_api_url}/sendPhoto",
-                json=payload
-            )
-            data = response.json()
-            
-            if not data.get('ok'):
-                logger.error(f"Bot API sendPhoto error: {data.get('description')}")
-                return False
-            
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send photo: {e}")
-            return False
-    
-    async def _send_document(self, chat_id: str, document_url: str, message_thread_id: Optional[int] = None) -> bool:
-        """Send a document via Bot API."""
-        try:
-            payload = {
-                'chat_id': chat_id,
-                'document': document_url,
-            }
-            if message_thread_id:
-                payload['message_thread_id'] = message_thread_id
-            
-            response = await self.http_client.post(
-                f"{self.bot_api_url}/sendDocument",
-                json=payload
-            )
-            data = response.json()
-            
-            if not data.get('ok'):
-                logger.error(f"Bot API sendDocument error: {data.get('description')}")
-                return False
-            
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send document: {e}")
-            return False
     
     async def send_pending_messages(self):
         """Main loop to send pending messages."""
@@ -861,8 +795,6 @@ class TelegramSender:
                     logger.warning("No Telegram destination configured")
                     await asyncio.sleep(10)
                     continue
-                
-                chat_id = dest['chat_id']
                 
                 # Fetch channels once per batch (avoid N calls)
                 channels = await self.api.get_channels()
@@ -884,26 +816,27 @@ class TelegramSender:
                         text = await self._format_message(msg, channel_name)
                         
                         # Determine topic ID if using topics
-                        message_thread_id = None
+                        reply_to = None
                         if dest['use_topics'] and channel and channel.get('telegram_topic_id'):
-                            message_thread_id = int(channel['telegram_topic_id'])
+                            reply_to = int(channel['telegram_topic_id'])
                         
-                        # Send text message if there's text
-                        if text:
-                            success = await self._send_message(chat_id, text, message_thread_id)
-                            if not success:
-                                await self.api.mark_failed(msg['id'], 'Failed to send message via Bot API')
-                                continue
+                        # Send message
+                        await self.client.send_message(
+                            dest['entity'],
+                            text,
+                            reply_to=reply_to,
+                            parse_mode=None  # Send plain text
+                        )
                         
                         # Handle attachments
                         if attachments and channel and channel.get('mirror_attachments', True):
                             for url in attachments[:5]:  # Limit to 5 attachments
                                 try:
-                                    # Determine if it's an image or other file
-                                    if any(ext in url.lower() for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
-                                        await self._send_photo(chat_id, url, message_thread_id)
-                                    else:
-                                        await self._send_document(chat_id, url, message_thread_id)
+                                    await self.client.send_file(
+                                        dest['entity'],
+                                        url,
+                                        reply_to=reply_to
+                                    )
                                 except Exception as e:
                                     logger.warning(f"Failed to send attachment: {e}")
                         
@@ -926,10 +859,10 @@ class TelegramSender:
             await asyncio.sleep(0.2)  # Fast loop
     
     async def stop(self):
-        """Stop the sender and close HTTP client."""
+        """Stop the sender and disconnect."""
         self.running = False
-        if self.http_client:
-            await self.http_client.aclose()
+        if self.client:
+            await self.client.disconnect()
         logger.info("Telegram sender stopped")
 
 # ============================================================================
