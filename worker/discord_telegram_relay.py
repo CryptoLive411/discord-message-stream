@@ -311,7 +311,8 @@ class ChannelTab:
             for (const sel of authorSelectors) {
                 const el = element.querySelector(sel);
                 if (el && el.innerText && el.innerText.trim()) {
-                    author = el.innerText.trim();
+                    // Get text content and strip emojis/special unicode chars (badges, diamonds, etc.)
+                    author = el.innerText.trim().replace(/[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{2300}-\u{23FF}\u{FE00}-\u{FE0F}\u{200D}💎]/gu, '').trim();
                     break;
                 }
             }
@@ -707,14 +708,14 @@ class TelegramSender:
         author = (msg.get('author_name') or '').strip()
         text = (msg.get('message_text') or '').strip()
 
-        # Avoid noisy "Unknown:" lines
-        header = f"[{channel_name}]"
+        # Simple format: "Author: message" (no channel prefix)
         if author and author.lower() != 'unknown':
-            header += f" {author}:"
-
-        if text:
-            return f"{header} {text}".strip()
-        return header
+            if text:
+                return f"{author}: {text}"
+            return f"{author}:"
+        
+        # Fallback for unknown author
+        return text if text else ""
     
     async def send_pending_messages(self):
         """Main loop to send pending messages."""
