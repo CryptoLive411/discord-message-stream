@@ -266,146 +266,49 @@ class ChannelTab:
     """Manages a single browser tab watching one Discord channel."""
     
     # JavaScript to inject for real-time message detection
+    # SIMPLIFIED VERSION - just track seen messages, forward anything new
     OBSERVER_SCRIPT = """
     (function() {
-        // Allow re-injection (Discord is an SPA and DOM containers can change).
-        // We keep persistent state, but we re-attach the MutationObserver when needed.
-        window.__discordObserverActive = true;
-        
-        // CRITICAL: Record the exact moment the bot started (first injection only)
-        const BOT_START_TIME = window.__discordObserverState?.botStartTime ?? Date.now();
-        
-        // Use window-level storage to persist across re-injections
+        // Allow re-injection but preserve state
         if (!window.__discordObserverState) {
             window.__discordObserverState = {
                 seenMessages: new Set(),
-                initialMaxSnowflake: 0n,
-                hasInitialMaxSnowflake: false,
-                isInitialized: false,
-                botStartTime: BOT_START_TIME,
-                // Warmup window: 15 seconds to let Discord fully hydrate all existing messages
-                warmupUntil: BOT_START_TIME + 15000,
-                // Track first mutation after warmup
-                firstMutationAfterWarmup: null
+                isInitialized: false
             };
-            console.log('[Observer] Bot started at:', new Date(BOT_START_TIME).toISOString());
-        } else {
-            console.log('[Observer] Re-injected; botStartTime stays:', new Date(window.__discordObserverState.botStartTime).toISOString());
+            console.log('[Observer] Initialized state');
         }
         
         const state = window.__discordObserverState;
         const seenMessages = state.seenMessages;
-        let lastProcessedId = null;
-        
-        function parseSnowflakeFromMessageId(id) {
-            if (!id) return null;
-            const matches = id.match(/(\\d{16,20})/g);
-            if (!matches || matches.length === 0) return null;
-            const token = matches[matches.length - 1];
-            try {
-                return BigInt(token);
-            } catch {
-                return null;
-            }
-        }
-
-        // Convert Discord snowflake to unix ms timestamp.
-        // https://discord.com/developers/docs/reference#snowflakes
-        function snowflakeToUnixMs(snowflake) {
-            try {
-                const DISCORD_EPOCH = 1420070400000n;
-                const ts = (snowflake >> 22n) + DISCORD_EPOCH;
-                return Number(ts);
-            } catch {
-                return null;
-            }
-        }
 
         function isDiscordAttachmentUrl(url) {
             if (!url) return false;
             return /https?:\\/\\/(cdn\\.discordapp\\.com|media\\.discordapp\\.net)\\/(attachments|ephemeral-attachments)\\//.test(url);
         }
 
-        // Initialize with existing messages to avoid backfill
+        // Mark all currently visible messages as "seen" on startup
         function initializeSeenMessages() {
-            if (state.isInitialized) {
-                console.log('[Observer] Already initialized, skipping re-scan');
-                return;
-            }
+            if (state.isInitialized) return;
             
-            // Mark ALL currently visible messages as "seen" - these existed before bot started
             const messages = document.querySelectorAll('[id^="chat-messages-"], [data-list-item-id^="chat-messages-"]');
             messages.forEach(msg => {
                 const id = msg.id || msg.getAttribute('data-list-item-id');
                 if (id) seenMessages.add(id);
-
-                const snowflake = parseSnowflakeFromMessageId(id);
-                if (snowflake !== null) {
-                    if (!state.hasInitialMaxSnowflake || snowflake > state.initialMaxSnowflake) {
-                        state.initialMaxSnowflake = snowflake;
-                        state.hasInitialMaxSnowflake = true;
-                    }
-                }
             });
             
             state.isInitialized = true;
-            console.log('[Observer] Initialized - marked', seenMessages.size, 'existing messages as seen');
-            console.log('[Observer] Initial max snowflake:', state.hasInitialMaxSnowflake ? state.initialMaxSnowflake.toString() : 'none');
-            console.log('[Observer] Will only process messages arriving after warmup ends at:', new Date(state.warmupUntil).toISOString());
+            console.log('[Observer] Marked', seenMessages.size, 'existing messages as seen - will only forward NEW messages');
         }
         
         // Extract message data from a DOM element
         function extractMessage(element) {
             const id = element.id || element.getAttribute('data-list-item-id');
             
-            const now = Date.now();
-
-            // Skip if already seen
+            // Skip if no id or already seen
             if (!id || seenMessages.has(id)) return null;
-
-            // GUARD 1: Block ALL messages until initialization is complete
-            if (!state.isInitialized) {
-                console.log('[Observer] BLOCKED (pre-init):', id);
-                return null;
-            }
-
-            // PRIMARY FILTER: Only allow messages that were CREATED after the bot started.
-            // This prevents backfill even if Discord hydrates older messages into the DOM later,
-            // and it DOES NOT block real new messages that arrive immediately after startup.
-            const snowflake = parseSnowflakeFromMessageId(id);
-            const createdAtMs = snowflake !== null ? snowflakeToUnixMs(snowflake) : null;
-            if (createdAtMs !== null && createdAtMs < (state.botStartTime - 1000)) {
-                // Mark as seen so hydration doesn't cause repeated work.
-                seenMessages.add(id);
-                console.log('[Observer] BLOCKED (pre-start timestamp):', id);
-                return null;
-            }
-
-            // GUARD 3: Snowflake-based check - reject anything older than initial max
-            if (state.hasInitialMaxSnowflake) {
-                if (snowflake !== null && snowflake <= state.initialMaxSnowflake) {
-                    seenMessages.add(id);
-                    console.log('[Observer] BLOCKED (old snowflake):', id);
-                    return null;
-                }
-            }
-
-            // From here on, we accept this message as eligible and mark as seen.
-            seenMessages.add(id);
-
-            // Advance cursor for new messages
-            if (snowflake !== null) {
-                if (!state.hasInitialMaxSnowflake || snowflake > state.initialMaxSnowflake) {
-                    state.initialMaxSnowflake = snowflake;
-                    state.hasInitialMaxSnowflake = true;
-                }
-            }
             
-            // Log first message after warmup
-            if (!state.firstMutationAfterWarmup) {
-                state.firstMutationAfterWarmup = now;
-                console.log('[Observer] First message AFTER warmup at:', new Date(now).toISOString());
-            }
+            // Mark as seen immediately
+            seenMessages.add(id);
             
             // Extract author
             let author = 'Unknown';
@@ -418,7 +321,6 @@ class ChannelTab:
             for (const sel of authorSelectors) {
                 const el = element.querySelector(sel);
                 if (el && el.innerText && el.innerText.trim()) {
-                    // Get text content and strip emojis/special unicode chars (badges, diamonds, etc.)
                     author = el.innerText.trim().replace(/[\\u{1F300}-\\u{1F9FF}\\u{2600}-\\u{26FF}\\u{2700}-\\u{27BF}\\u{1F600}-\\u{1F64F}\\u{1F680}-\\u{1F6FF}\\u{1F1E0}-\\u{1F1FF}\\u{1FA00}-\\u{1FA6F}\\u{1FA70}-\\u{1FAFF}\\u{2300}-\\u{23FF}\\u{FE00}-\\u{FE0F}\\u{200D}]/gu, '').trim();
                     break;
                 }
@@ -469,9 +371,7 @@ class ChannelTab:
                 if (node.nodeType !== 1) return;
 
                 const candidates = [];
-                // If the node itself is a message
                 if (node.matches?.(MSG_SELECTOR)) candidates.push(node);
-                // Also scan within subtree (Discord often adds wrapper nodes)
                 if (node.querySelectorAll) {
                     node.querySelectorAll(MSG_SELECTOR).forEach(el => candidates.push(el));
                 }
@@ -479,7 +379,7 @@ class ChannelTab:
                 candidates.forEach(el => {
                     const msg = extractMessage(el);
                     if (msg) {
-                        console.log('[Observer] New message detected:', msg.author, msg.content?.substring(0, 50));
+                        console.log('[Observer] New message:', msg.author, msg.content?.substring(0, 50));
                         window.__onNewMessage(JSON.stringify(msg));
                     }
                 });
@@ -488,7 +388,6 @@ class ChannelTab:
         
         // Set up MutationObserver
         function setupObserver() {
-            // Find the messages container
             const container = document.querySelector('[class*="messagesWrapper-"]') ||
                               document.querySelector('[class*="scrollerInner-"]') ||
                               document.querySelector('main');
@@ -499,7 +398,7 @@ class ChannelTab:
                 return;
             }
             
-            // Disconnect any previous observer from older containers
+            // Disconnect previous observer if exists
             if (window.__discordMutationObserver) {
                 try { window.__discordMutationObserver.disconnect(); } catch (e) {}
             }
@@ -518,11 +417,10 @@ class ChannelTab:
             });
 
             window.__discordMutationObserver = observer;
-            
             console.log('[Observer] MutationObserver active on', container.className);
         }
         
-        // Scroll to bottom to ensure we see latest messages
+        // Scroll to bottom to see latest messages
         function scrollToBottom() {
             const scroller = document.querySelector('[class*="messagesWrapper-"]');
             if (scroller) {
@@ -530,7 +428,7 @@ class ChannelTab:
             }
         }
         
-        // Wait for messages to appear before initializing
+        // Wait for messages then initialize
         function waitForInitialMessages(attempt = 0) {
             const messages = document.querySelectorAll('[id^="chat-messages-"], [data-list-item-id^="chat-messages-"]');
             if (messages.length > 0) {
@@ -539,20 +437,19 @@ class ChannelTab:
                 return;
             }
             if (attempt >= 30) {
-                console.log('[Observer] No messages found after wait; starting observer anyway');
+                console.log('[Observer] No messages found; starting observer anyway');
+                state.isInitialized = true;
                 setupObserver();
                 return;
             }
             setTimeout(() => waitForInitialMessages(attempt + 1), 200);
         }
         
-        // Initialize
+        // Start
         setTimeout(() => {
             scrollToBottom();
-            setTimeout(() => {
-                waitForInitialMessages();
-            }, 800);
-        }, 1000);
+            setTimeout(() => waitForInitialMessages(), 500);
+        }, 500);
     })();
     """
     
