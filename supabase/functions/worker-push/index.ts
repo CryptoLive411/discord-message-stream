@@ -101,6 +101,15 @@ Deno.serve(async (req) => {
           );
         }
 
+        // Check if author is in tracked_authors list (whitelist - always relay)
+        const { data: trackedAuthor } = await supabase
+          .from("tracked_authors")
+          .select("id")
+          .ilike("username", author_name)
+          .maybeSingle();
+        
+        const isTrackedAuthor = !!trackedAuthor;
+
         // Check if AI parser is enabled
         const { data: parserSetting } = await supabase
           .from("relay_settings")
@@ -115,13 +124,16 @@ Deno.serve(async (req) => {
           formatted: message_text 
         };
         
-        if (parserEnabled) {
+        // If tracked author, bypass AI parser entirely - always relay their messages
+        if (isTrackedAuthor) {
+          parsed = { type: "alpha_call", formatted: message_text };
+        } else if (parserEnabled) {
           // Parse the signal with AI to filter noise and format nicely
           parsed = await parseSignal(message_text, author_name, workerKey || "");
         }
           
-        // Skip noise messages
-        if (parsed.type === "skip") {
+        // Skip noise messages (but never skip tracked authors)
+        if (parsed.type === "skip" && !isTrackedAuthor) {
             // Still update cursor so we don't re-process this message
             await supabase
               .from("discord_channels")
@@ -184,20 +196,21 @@ Deno.serve(async (req) => {
         if (incErr) throw incErr;
 
         // Enhanced log with full details
-        const signalTypeLabel = parserEnabled ? parsed.type.toUpperCase() : "RAW";
+        const signalTypeLabel = isTrackedAuthor ? "TRACKED" : (parserEnabled ? parsed.type.toUpperCase() : "RAW");
         await supabase.from("relay_logs").insert({
           level: "success",
           message: `${signalTypeLabel} signal queued from #${channelName}`,
           channel_name: channelName,
-          signal_type: parserEnabled ? parsed.type : "raw",
+          signal_type: isTrackedAuthor ? "tracked" : (parserEnabled ? parsed.type : "raw"),
           author_name: author_name,
           original_text: message_text.substring(0, 500),
           formatted_text: parsed.formatted?.substring(0, 500),
-          details: parserEnabled ? `Parsed as ${parsed.type}` : "Parser disabled - raw message",
+          details: isTrackedAuthor ? `Tracked author - bypassed filter` : (parserEnabled ? `Parsed as ${parsed.type}` : "Parser disabled - raw message"),
           metadata: { 
-            signalType: parserEnabled ? parsed.type : "raw", 
+            signalType: isTrackedAuthor ? "tracked" : (parserEnabled ? parsed.type : "raw"), 
             authorName: author_name,
             parserEnabled,
+            isTrackedAuthor,
           },
         });
 
