@@ -15,6 +15,7 @@ import { Separator } from '@/components/ui/separator';
 import { DiscordIcon } from '@/components/icons/DiscordIcon';
 import { TelegramIcon } from '@/components/icons/TelegramIcon';
 import { TrackedAuthorsSection } from '@/components/settings/TrackedAuthorsSection';
+import { BannedAuthorsSection } from '@/components/settings/BannedAuthorsSection';
 import { Save, Key, RefreshCw, Shield, Clock, Zap } from 'lucide-react';
 import { useState } from 'react';
 
@@ -167,6 +168,9 @@ export default function Settings() {
 
         {/* Tracked Authors Whitelist */}
         <TrackedAuthorsSection />
+
+        {/* Banned Authors Blacklist */}
+        <BannedAuthorsSection />
 
         {/* Message Formatting */}
         <div className="glass-card rounded-xl p-6 space-y-4">

@@ -146,6 +146,24 @@ Deno.serve(async (req) => {
         );
       }
 
+      case "get_banned_authors": {
+        // Get global blacklist of authors to ban
+        const { data: authors, error } = await supabase
+          .from("banned_authors")
+          .select("username")
+          .order("username");
+
+        if (error) throw error;
+
+        // Return just the usernames as an array
+        const usernames = authors?.map(a => a.username) || [];
+
+        return new Response(
+          JSON.stringify({ authors: usernames }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
       default:
         return new Response(
           JSON.stringify({ error: "Unknown action. Use: get_channels, get_pending_messages, get_telegram_config, get_stats, get_connection_status, get_tracked_authors" }),
