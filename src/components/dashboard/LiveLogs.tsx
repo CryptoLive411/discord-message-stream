@@ -119,13 +119,15 @@ export function LiveLogs({ logs, maxHeight = '400px', showFilters = false }: Liv
         )}
       </div>
       <div className="divide-y divide-border/30">
-        {filteredLogs.map((log) => {
+        {filteredLogs.map((log, index) => {
           const isExpanded = expandedLogs.has(log.id);
           const hasDetails = log.details || log.channel;
+          // Use index as fallback to ensure unique keys even if IDs are duplicated
+          const uniqueKey = `${log.id}-${index}`;
           
           return (
             <div 
-              key={log.id} 
+              key={uniqueKey} 
               className={cn('log-entry cursor-pointer hover:bg-muted/30 transition-colors', getLogClass(log.level))}
               onClick={() => hasDetails && toggleExpand(log.id)}
             >
