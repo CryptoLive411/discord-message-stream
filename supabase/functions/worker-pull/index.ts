@@ -128,9 +128,27 @@ Deno.serve(async (req) => {
         );
       }
 
+      case "get_tracked_authors": {
+        // Get global whitelist of authors to track
+        const { data: authors, error } = await supabase
+          .from("tracked_authors")
+          .select("username")
+          .order("username");
+
+        if (error) throw error;
+
+        // Return just the usernames as an array
+        const usernames = authors?.map(a => a.username) || [];
+
+        return new Response(
+          JSON.stringify({ authors: usernames }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
       default:
         return new Response(
-          JSON.stringify({ error: "Unknown action. Use: get_channels, get_pending_messages, get_telegram_config, get_stats, get_connection_status" }),
+          JSON.stringify({ error: "Unknown action. Use: get_channels, get_pending_messages, get_telegram_config, get_stats, get_connection_status, get_tracked_authors" }),
           { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
     }

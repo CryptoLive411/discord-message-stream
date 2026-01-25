@@ -229,6 +229,27 @@ export type Database = {
         }
         Relationships: []
       }
+      tracked_authors: {
+        Row: {
+          created_at: string
+          id: string
+          notes: string | null
+          username: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          notes?: string | null
+          username: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          notes?: string | null
+          username?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
