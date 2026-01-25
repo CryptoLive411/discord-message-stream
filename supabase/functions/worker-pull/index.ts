@@ -164,6 +164,63 @@ Deno.serve(async (req) => {
         );
       }
 
+      case "get_pending_commands": {
+        // Get pending commands for the worker to execute
+        const { data: commands, error } = await supabase
+          .from("worker_commands")
+          .select("*")
+          .eq("status", "pending")
+          .order("created_at");
+
+        if (error) throw error;
+
+        return new Response(
+          JSON.stringify({ commands }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      case "ack_command": {
+        // Acknowledge command execution
+        const body = await req.json();
+        const { commandId, result, success } = body;
+
+        const { error } = await supabase
+          .from("worker_commands")
+          .update({
+            status: success ? "executed" : "failed",
+            executed_at: new Date().toISOString(),
+            result: result || null,
+          })
+          .eq("id", commandId);
+
+        if (error) throw error;
+
+        return new Response(
+          JSON.stringify({ success: true }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      case "heartbeat": {
+        // Worker sends heartbeat to indicate it's alive
+        const { error } = await supabase
+          .from("connection_status")
+          .update({
+            status: "connected",
+            last_ping_at: new Date().toISOString(),
+            error_message: null,
+          })
+          .eq("service", "worker");
+
+        if (error) throw error;
+
+        return new Response(
+          JSON.stringify({ success: true }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
       default:
         return new Response(
           JSON.stringify({ error: "Unknown action. Use: get_channels, get_pending_messages, get_telegram_config, get_stats, get_connection_status, get_tracked_authors" }),

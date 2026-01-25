@@ -3,7 +3,8 @@ import { StatCard } from '@/components/dashboard/StatCard';
 import { ChannelList } from '@/components/dashboard/ChannelList';
 import { LiveLogs } from '@/components/dashboard/LiveLogs';
 import { ActivityChart } from '@/components/dashboard/ActivityChart';
-import { useChannels } from '@/hooks/useChannels';
+import { WorkerControlPanel } from '@/components/dashboard/WorkerControlPanel';
+import { useChannels, useUpdateChannel } from '@/hooks/useChannels';
 import { useLogs, useRealtimeLogs } from '@/hooks/useLogs';
 import { useStats } from '@/hooks/useStats';
 import { useConnectionStatus } from '@/hooks/useConnectionStatus';
@@ -21,10 +22,15 @@ function formatUptime(ms: number): string {
 
 export default function Dashboard() {
   const { data: channels = [], isLoading: channelsLoading } = useChannels();
+  const updateChannel = useUpdateChannel();
   const { data: initialLogs = [] } = useLogs(50);
   const logs = useRealtimeLogs(initialLogs);
   const { data: stats, isLoading: statsLoading } = useStats();
   const { data: connectionStatus } = useConnectionStatus();
+
+  const handleToggleChannel = (id: string, enabled: boolean) => {
+    updateChannel.mutate({ id, enabled });
+  };
 
   const activeChannels = channels.filter((c) => c.enabled && c.status === 'active').length;
   const isOnline = connectionStatus?.discord === 'connected' && connectionStatus?.telegram === 'connected';
@@ -101,42 +107,45 @@ export default function Dashboard() {
             <ActivityChart />
           </div>
 
-          {/* Quick Stats */}
-          <div className="glass-card rounded-xl p-5 space-y-4">
-            <h2 className="font-semibold text-foreground">Quick Actions</h2>
-            <div className="space-y-3">
-              <Link to="/channels">
-                <Button variant="outline" className="w-full justify-between group">
-                  <span>Add Channel</span>
-                  <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-                </Button>
-              </Link>
-              <Link to="/logs">
-                <Button variant="outline" className="w-full justify-between group">
-                  <span>View All Logs</span>
-                  <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-                </Button>
-              </Link>
-              <Link to="/health">
-                <Button variant="outline" className="w-full justify-between group">
-                  <span>System Health</span>
-                  <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-                </Button>
-              </Link>
-            </div>
+          {/* Worker Control Panel */}
+          <WorkerControlPanel />
+        </div>
 
-            {(stats?.attachmentFailures || 0) > 0 && (
-              <div className="p-3 rounded-lg bg-warning/10 border border-warning/30 flex items-start gap-2">
-                <AlertTriangle className="w-4 h-4 text-warning flex-shrink-0 mt-0.5" />
-                <div className="text-xs">
-                  <p className="font-medium text-warning">Attachment Failures</p>
-                  <p className="text-muted-foreground mt-0.5">
-                    {stats?.attachmentFailures} uploads failed in the last hour
-                  </p>
-                </div>
-              </div>
-            )}
+        {/* Quick Actions Row */}
+        <div className="glass-card rounded-xl p-5 space-y-4">
+          <h2 className="font-semibold text-foreground">Quick Actions</h2>
+          <div className="flex gap-3 flex-wrap">
+            <Link to="/channels">
+              <Button variant="outline" className="group">
+                <span>Add Channel</span>
+                <ArrowRight className="w-4 h-4 ml-2 group-hover:translate-x-1 transition-transform" />
+              </Button>
+            </Link>
+            <Link to="/logs">
+              <Button variant="outline" className="group">
+                <span>View All Logs</span>
+                <ArrowRight className="w-4 h-4 ml-2 group-hover:translate-x-1 transition-transform" />
+              </Button>
+            </Link>
+            <Link to="/health">
+              <Button variant="outline" className="group">
+                <span>System Health</span>
+                <ArrowRight className="w-4 h-4 ml-2 group-hover:translate-x-1 transition-transform" />
+              </Button>
+            </Link>
           </div>
+
+          {(stats?.attachmentFailures || 0) > 0 && (
+            <div className="p-3 rounded-lg bg-warning/10 border border-warning/30 flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 text-warning flex-shrink-0 mt-0.5" />
+              <div className="text-xs">
+                <p className="font-medium text-warning">Attachment Failures</p>
+                <p className="text-muted-foreground mt-0.5">
+                  {stats?.attachmentFailures} uploads failed in the last hour
+                </p>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Channels & Logs */}
