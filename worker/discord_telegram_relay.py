@@ -268,13 +268,12 @@ class ChannelTab:
     # JavaScript to inject for real-time message detection
     OBSERVER_SCRIPT = """
     (function() {
-        // Avoid double-injection - preserve state across re-injections
-        if (window.__discordObserverActive) return;
+        // Allow re-injection (Discord is an SPA and DOM containers can change).
+        // We keep persistent state, but we re-attach the MutationObserver when needed.
         window.__discordObserverActive = true;
         
-        // CRITICAL: Record the exact moment the bot started
-        // This is the PRIMARY filter - only messages arriving AFTER this time are processed
-        const BOT_START_TIME = Date.now();
+        // CRITICAL: Record the exact moment the bot started (first injection only)
+        const BOT_START_TIME = window.__discordObserverState?.botStartTime ?? Date.now();
         
         // Use window-level storage to persist across re-injections
         if (!window.__discordObserverState) {
@@ -290,6 +289,8 @@ class ChannelTab:
                 firstMutationAfterWarmup: null
             };
             console.log('[Observer] Bot started at:', new Date(BOT_START_TIME).toISOString());
+        } else {
+            console.log('[Observer] Re-injected; botStartTime stays:', new Date(window.__discordObserverState.botStartTime).toISOString());
         }
         
         const state = window.__discordObserverState;
@@ -463,32 +464,25 @@ class ChannelTab:
         
         // Process new message nodes
         function processNewMessages(nodes) {
+            const MSG_SELECTOR = '[id^="chat-messages-"], [data-list-item-id^="chat-messages-"]';
             nodes.forEach(node => {
                 if (node.nodeType !== 1) return;
-                
-                // Check if this is a message element
-                const isMessage = node.id?.startsWith('chat-messages-') || 
-                                  node.getAttribute?.('data-list-item-id')?.startsWith('chat-messages-');
-                
-                if (isMessage) {
-                    const msg = extractMessage(node);
+
+                const candidates = [];
+                // If the node itself is a message
+                if (node.matches?.(MSG_SELECTOR)) candidates.push(node);
+                // Also scan within subtree (Discord often adds wrapper nodes)
+                if (node.querySelectorAll) {
+                    node.querySelectorAll(MSG_SELECTOR).forEach(el => candidates.push(el));
+                }
+
+                candidates.forEach(el => {
+                    const msg = extractMessage(el);
                     if (msg) {
                         console.log('[Observer] New message detected:', msg.author, msg.content?.substring(0, 50));
                         window.__onNewMessage(JSON.stringify(msg));
                     }
-                }
-                
-                // Also check children (for batch insertions)
-                if (node.querySelectorAll) {
-                    const childMessages = node.querySelectorAll('[id^="chat-messages-"]');
-                    childMessages.forEach(child => {
-                        const msg = extractMessage(child);
-                        if (msg) {
-                            console.log('[Observer] New message detected (child):', msg.author);
-                            window.__onNewMessage(JSON.stringify(msg));
-                        }
-                    });
-                }
+                });
             });
         }
         
@@ -505,6 +499,11 @@ class ChannelTab:
                 return;
             }
             
+            // Disconnect any previous observer from older containers
+            if (window.__discordMutationObserver) {
+                try { window.__discordMutationObserver.disconnect(); } catch (e) {}
+            }
+
             const observer = new MutationObserver((mutations) => {
                 for (const mutation of mutations) {
                     if (mutation.addedNodes.length > 0) {
@@ -517,6 +516,8 @@ class ChannelTab:
                 childList: true,
                 subtree: true
             });
+
+            window.__discordMutationObserver = observer;
             
             console.log('[Observer] MutationObserver active on', container.className);
         }
