@@ -1154,13 +1154,23 @@ class TelegramSender:
                         if dest['use_topics'] and channel and channel.get('telegram_topic_id'):
                             reply_to = int(channel['telegram_topic_id'])
                         
-                        # Send message
-                        await self.client.send_message(
-                            dest['entity'],
-                            text,
-                            reply_to=reply_to,
-                            parse_mode=None  # Send plain text
-                        )
+                        # Skip if both text and attachments are empty
+                        has_text = text and text.strip()
+                        has_attachments = attachments and channel and channel.get('mirror_attachments', True)
+                        
+                        if not has_text and not has_attachments:
+                            logger.info(f"Skipping empty message {msg['id'][:8]}...")
+                            await self.api.mark_sent(msg['id'])  # Mark as handled
+                            continue
+                        
+                        # Send text message only if we have text
+                        if has_text:
+                            await self.client.send_message(
+                                dest['entity'],
+                                text,
+                                reply_to=reply_to,
+                                parse_mode=None  # Send plain text
+                            )
                         
                         # Handle attachments
                         if attachments and channel and channel.get('mirror_attachments', True):
