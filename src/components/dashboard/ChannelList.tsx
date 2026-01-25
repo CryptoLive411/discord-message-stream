@@ -17,9 +17,10 @@ interface ChannelListProps {
   channels: DiscordChannel[];
   compact?: boolean;
   onToggleEnabled?: (id: string, enabled: boolean) => void;
+  onEditMapping?: (channel: DiscordChannel) => void;
 }
 
-export function ChannelList({ channels, compact = false, onToggleEnabled }: ChannelListProps) {
+export function ChannelList({ channels, compact = false, onToggleEnabled, onEditMapping }: ChannelListProps) {
   const getStatusColor = (status: DiscordChannel['status']) => {
     switch (status) {
       case 'active':
@@ -120,7 +121,9 @@ export function ChannelList({ channels, compact = false, onToggleEnabled }: Chan
                 <Power className="w-4 h-4 mr-2" />
                 {channel.enabled ? 'Disable Tracking' : 'Enable Tracking'}
               </DropdownMenuItem>
-              <DropdownMenuItem>Edit Mapping</DropdownMenuItem>
+              <DropdownMenuItem onClick={() => onEditMapping?.(channel)}>
+                Edit Mapping
+              </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem className="text-destructive">Remove</DropdownMenuItem>
             </DropdownMenuContent>
