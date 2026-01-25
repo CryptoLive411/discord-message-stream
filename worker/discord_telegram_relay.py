@@ -268,19 +268,25 @@ class ChannelTab:
     # JavaScript to inject for real-time message detection
     OBSERVER_SCRIPT = """
     (function() {
-        // Avoid double-injection
+        // Avoid double-injection - preserve state across re-injections
         if (window.__discordObserverActive) return;
         window.__discordObserverActive = true;
         
-        const seenMessages = new Set();
+        // Use window-level storage to persist across re-injections
+        if (!window.__discordObserverState) {
+            window.__discordObserverState = {
+                seenMessages: new Set(),
+                initialMaxSnowflake: 0n,
+                hasInitialMaxSnowflake: false,
+                isInitialized: false,
+                // Warmup window: 10 seconds to let Discord fully hydrate
+                warmupUntil: Date.now() + 10000
+            };
+        }
+        
+        const state = window.__discordObserverState;
+        const seenMessages = state.seenMessages;
         let lastProcessedId = null;
-        // Track the newest (max) Discord snowflake we see at init time.
-        // Anything older/equal is treated as history/backfill and ignored.
-        let initialMaxSnowflake = 0n;
-        let hasInitialMaxSnowflake = false;
-        // Warmup window: Discord hydrates existing messages after navigation.
-        // During this time, we record IDs but do NOT forward anything.
-        let warmupUntil = Date.now() + 4000;
         
         function parseSnowflakeFromMessageId(id) {
             // Examples we may see:
@@ -306,6 +312,12 @@ class ChannelTab:
 
         // Initialize with existing messages to avoid backfill
         function initializeSeenMessages() {
+            // Skip if already initialized (prevents re-scanning on observer re-injection)
+            if (state.isInitialized) {
+                console.log('[Observer] Already initialized, skipping re-scan');
+                return;
+            }
+            
             const messages = document.querySelectorAll('[id^="chat-messages-"], [data-list-item-id^="chat-messages-"]');
             messages.forEach(msg => {
                 const id = msg.id || msg.getAttribute('data-list-item-id');
@@ -313,16 +325,20 @@ class ChannelTab:
 
                 const snowflake = parseSnowflakeFromMessageId(id);
                 if (snowflake !== null) {
-                    if (!hasInitialMaxSnowflake || snowflake > initialMaxSnowflake) {
-                        initialMaxSnowflake = snowflake;
-                        hasInitialMaxSnowflake = true;
+                    if (!state.hasInitialMaxSnowflake || snowflake > state.initialMaxSnowflake) {
+                        state.initialMaxSnowflake = snowflake;
+                        state.hasInitialMaxSnowflake = true;
                     }
                 }
             });
             if (messages.length > 0) {
                 lastProcessedId = messages[messages.length - 1].id;
             }
-            console.log('[Observer] Initialized with', seenMessages.size, 'existing messages', hasInitialMaxSnowflake ? `(initialMax=${initialMaxSnowflake.toString()})` : '(no snowflake parsed)');
+            
+            // Mark as initialized - this is THE critical flag
+            state.isInitialized = true;
+            
+            console.log('[Observer] Initialized with', seenMessages.size, 'existing messages', state.hasInitialMaxSnowflake ? `(initialMax=${state.initialMaxSnowflake.toString()})` : '(no snowflake parsed)');
         }
         
         // Extract message data from a DOM element
@@ -332,20 +348,27 @@ class ChannelTab:
             
             seenMessages.add(id);
 
+            // CRITICAL: Block ALL messages until fully initialized
+            if (!state.isInitialized) {
+                console.log('[Observer] Skipping pre-init message:', id);
+                return null;
+            }
+
             // Hard backfill prevention: ignore any message older/equal to newest message at startup.
-            if (hasInitialMaxSnowflake) {
+            if (state.hasInitialMaxSnowflake) {
                 const snowflake = parseSnowflakeFromMessageId(id);
-                if (snowflake !== null && snowflake <= initialMaxSnowflake) {
+                if (snowflake !== null && snowflake <= state.initialMaxSnowflake) {
+                    console.log('[Observer] Skipping old message (snowflake):', id);
                     return null;
                 }
                 // If it is newer, advance our cursor so we keep moving forward.
-                if (snowflake !== null && snowflake > initialMaxSnowflake) {
-                    initialMaxSnowflake = snowflake;
+                if (snowflake !== null && snowflake > state.initialMaxSnowflake) {
+                    state.initialMaxSnowflake = snowflake;
                 }
             }
             
             // Ignore anything that appears during initial hydration / warmup.
-            if (Date.now() < warmupUntil) {
+            if (Date.now() < state.warmupUntil) {
                 console.log('[Observer] Skipping warmup message:', id);
                 return null;
             }
