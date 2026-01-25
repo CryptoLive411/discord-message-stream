@@ -326,13 +326,18 @@ class DiscordWatcher:
         try:
             await self.api.log('info', f"Navigating to channel", channel_name, f"URL: {channel_url}")
             await self.page.goto(channel_url, wait_until='domcontentloaded')
-            await asyncio.sleep(0.5)
+            
+            # Wait for messages container to appear (Discord needs time to load)
+            try:
+                await self.page.wait_for_selector('[class*="messagesWrapper-"]', timeout=5000)
+            except:
+                await asyncio.sleep(1.5)  # Fallback wait
             
             # Scroll to bottom of chat to ensure messages are hydrated (Discord virtualizes the list)
             chat_scroller = await self.page.query_selector('[class*="messagesWrapper-"]')
             if chat_scroller:
                 await chat_scroller.evaluate('el => el.scrollTop = el.scrollHeight')
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.5)  # Give time for virtualized content to render
             
             # Try multiple selectors for Discord messages (Discord changes these frequently)
             selectors = [
