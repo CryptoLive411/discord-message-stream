@@ -271,6 +271,33 @@ export type Database = {
         }
         Relationships: []
       }
+      worker_commands: {
+        Row: {
+          command: string
+          created_at: string
+          executed_at: string | null
+          id: string
+          result: string | null
+          status: string
+        }
+        Insert: {
+          command: string
+          created_at?: string
+          executed_at?: string | null
+          id?: string
+          result?: string | null
+          status?: string
+        }
+        Update: {
+          command?: string
+          created_at?: string
+          executed_at?: string | null
+          id?: string
+          result?: string | null
+          status?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
