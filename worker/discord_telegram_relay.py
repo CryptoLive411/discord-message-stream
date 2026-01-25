@@ -785,8 +785,11 @@ class ChannelTab:
             if tracked:  # If whitelist is non-empty, filter
                 # Case-insensitive comparison
                 tracked_lower = [a.lower() for a in tracked]
-                if author.lower() not in tracked_lower:
-                    logger.debug(f"[{self.channel_name}] Skipping message from non-tracked author: {author}")
+                # Allow "Unknown" authors through when whitelist is active
+                # (we can't filter what we can't identify)
+                if author.lower() != 'unknown' and author.lower() not in tracked_lower:
+                    logger.info(f"[{self.channel_name}] Skipping message from non-tracked author: {author}")
+                    await self.api.log('info', f"Skipped non-whitelisted author: {author}", self.channel_name)
                     return
             
             fingerprint = self._generate_fingerprint(msg['message_id'])
