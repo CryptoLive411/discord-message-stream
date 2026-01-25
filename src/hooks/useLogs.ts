@@ -1,9 +1,41 @@
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/integrations/supabase/client';
-import { LogEntry } from '@/types';
 import { useEffect, useState } from 'react';
 
-function transformLog(row: any): LogEntry {
+export interface EnhancedLogEntry {
+  id: string;
+  timestamp: Date;
+  level: 'info' | 'success' | 'warning' | 'error';
+  message: string;
+  channel?: string;
+  details?: string;
+  signalType?: string;
+  authorName?: string;
+  originalText?: string;
+  formattedText?: string;
+}
+
+// Keep old LogEntry type for backwards compatibility
+export interface LogEntry {
+  id: string;
+  timestamp: Date;
+  level: 'info' | 'success' | 'warning' | 'error';
+  message: string;
+  channel?: string;
+  details?: string;
+}
+
+function transformLog(row: any): EnhancedLogEntry {
+  // Parse metadata if it exists
+  let metadata: any = {};
+  if (row.metadata) {
+    try {
+      metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
+    } catch (e) {
+      // ignore
+    }
+  }
+
   return {
     id: row.id,
     timestamp: new Date(row.created_at),
@@ -11,6 +43,10 @@ function transformLog(row: any): LogEntry {
     message: row.message,
     channel: row.channel_name,
     details: row.details,
+    signalType: row.signal_type || metadata?.signalType,
+    authorName: row.author_name || metadata?.authorName,
+    originalText: row.original_text || metadata?.originalText,
+    formattedText: row.formatted_text || metadata?.formattedText,
   };
 }
 
@@ -27,12 +63,12 @@ export function useLogs(limit = 100) {
       if (error) throw error;
       return data.map(transformLog);
     },
-    refetchInterval: 5000, // Refresh every 5 seconds
+    refetchInterval: 3000, // Refresh every 3 seconds for more responsive logs
   });
 }
 
-export function useRealtimeLogs(initialLogs: LogEntry[] = []) {
-  const [logs, setLogs] = useState<LogEntry[]>(initialLogs);
+export function useRealtimeLogs(initialLogs: EnhancedLogEntry[] = []) {
+  const [logs, setLogs] = useState<EnhancedLogEntry[]>(initialLogs);
 
   useEffect(() => {
     // Set initial logs
@@ -51,7 +87,7 @@ export function useRealtimeLogs(initialLogs: LogEntry[] = []) {
         },
         (payload) => {
           const newLog = transformLog(payload.new);
-          setLogs((prev) => [newLog, ...prev.slice(0, 99)]);
+          setLogs((prev) => [newLog, ...prev.slice(0, 199)]); // Keep more logs
         }
       )
       .subscribe();

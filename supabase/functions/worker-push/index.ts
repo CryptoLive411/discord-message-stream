@@ -70,6 +70,14 @@ Deno.serve(async (req) => {
         // Push a new message from Discord to the queue
         const { channel_id, fingerprint, discord_message_id, message_text, author_name, attachment_urls } = data;
 
+        // Get channel info early for logging
+        const { data: channel } = await supabase
+          .from("discord_channels")
+          .select("name")
+          .eq("id", channel_id)
+          .single();
+        const channelName = channel?.name || "unknown";
+
         // Check for duplicate (use limit instead of single to avoid errors on multiple matches)
         const { data: existingRows } = await supabase
           .from("message_queue")
@@ -93,38 +101,52 @@ Deno.serve(async (req) => {
           );
         }
 
-        // Parse the signal with AI to filter noise and format nicely
-        const parsed = await parseSignal(message_text, author_name, workerKey || "");
+        // Check if AI parser is enabled
+        const { data: parserSetting } = await supabase
+          .from("relay_settings")
+          .select("setting_value")
+          .eq("setting_key", "ai_parser_enabled")
+          .maybeSingle();
         
+        const parserEnabled = parserSetting?.setting_value === true || parserSetting?.setting_value === "true";
+
+        let parsed: { type: "ca" | "leverage_trade" | "alpha_call" | "skip"; formatted: string | null } = { 
+          type: "alpha_call", 
+          formatted: message_text 
+        };
+        
+        if (parserEnabled) {
+          // Parse the signal with AI to filter noise and format nicely
+          parsed = await parseSignal(message_text, author_name, workerKey || "");
+        }
+          
         // Skip noise messages
         if (parsed.type === "skip") {
-          // Still update cursor so we don't re-process this message
-          await supabase
-            .from("discord_channels")
-            .update({
-              last_message_fingerprint: fingerprint,
-              last_message_at: new Date().toISOString(),
-            })
-            .eq("id", channel_id);
+            // Still update cursor so we don't re-process this message
+            await supabase
+              .from("discord_channels")
+              .update({
+                last_message_fingerprint: fingerprint,
+                last_message_at: new Date().toISOString(),
+              })
+              .eq("id", channel_id);
 
-          // Log that we skipped
-          const { data: channel } = await supabase
-            .from("discord_channels")
-            .select("name")
-            .eq("id", channel_id)
-            .single();
+            // Enhanced log for skipped messages
+            await supabase.from("relay_logs").insert({
+              level: "info",
+              message: `Skipped noise from #${channelName}`,
+              channel_name: channelName,
+              signal_type: "skip",
+              author_name: author_name,
+              original_text: message_text.substring(0, 500),
+              details: `Filtered by AI parser`,
+              metadata: { signalType: "skip", authorName: author_name },
+            });
 
-          await supabase.from("relay_logs").insert({
-            level: "info",
-            message: `Skipped noise from #${channel?.name || "unknown"}`,
-            channel_name: channel?.name,
-            details: `Author: ${author_name}, Preview: ${message_text.substring(0, 50)}...`,
-          });
-
-          return new Response(
-            JSON.stringify({ success: true, skipped: true, reason: "noise" }),
-            { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-          );
+            return new Response(
+              JSON.stringify({ success: true, skipped: true, reason: "noise" }),
+              { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
         }
 
         // Use formatted message if available, otherwise use original
@@ -161,18 +183,22 @@ Deno.serve(async (req) => {
         const { error: incErr } = await supabase.rpc("increment_message_count", { row_id: channel_id });
         if (incErr) throw incErr;
 
-        // Log the event with signal type
-        const { data: channel } = await supabase
-          .from("discord_channels")
-          .select("name")
-          .eq("id", channel_id)
-          .single();
-
+        // Enhanced log with full details
+        const signalTypeLabel = parserEnabled ? parsed.type.toUpperCase() : "RAW";
         await supabase.from("relay_logs").insert({
           level: "success",
-          message: `${parsed.type.toUpperCase()} signal queued from #${channel?.name || "unknown"}`,
-          channel_name: channel?.name,
-          details: `Author: ${author_name}, Type: ${parsed.type}`,
+          message: `${signalTypeLabel} signal queued from #${channelName}`,
+          channel_name: channelName,
+          signal_type: parserEnabled ? parsed.type : "raw",
+          author_name: author_name,
+          original_text: message_text.substring(0, 500),
+          formatted_text: parsed.formatted?.substring(0, 500),
+          details: parserEnabled ? `Parsed as ${parsed.type}` : "Parser disabled - raw message",
+          metadata: { 
+            signalType: parserEnabled ? parsed.type : "raw", 
+            authorName: author_name,
+            parserEnabled,
+          },
         });
 
         return new Response(

@@ -15,6 +15,7 @@ import { Separator } from '@/components/ui/separator';
 import { DiscordIcon } from '@/components/icons/DiscordIcon';
 import { TelegramIcon } from '@/components/icons/TelegramIcon';
 import { BannedAuthorsSection } from '@/components/settings/BannedAuthorsSection';
+import { ParserSettingsSection } from '@/components/settings/ParserSettingsSection';
 import { Save, Key, RefreshCw, Shield, Clock, Zap } from 'lucide-react';
 import { useState } from 'react';
 
@@ -164,6 +165,9 @@ export default function Settings() {
             </Button>
           </div>
         </div>
+
+        {/* AI Signal Parser */}
+        <ParserSettingsSection />
 
         {/* Banned Authors Blacklist */}
         <BannedAuthorsSection />
