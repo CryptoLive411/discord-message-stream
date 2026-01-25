@@ -14,6 +14,7 @@ import {
 import { Separator } from '@/components/ui/separator';
 import { DiscordIcon } from '@/components/icons/DiscordIcon';
 import { TelegramIcon } from '@/components/icons/TelegramIcon';
+import { TrackedAuthorsSection } from '@/components/settings/TrackedAuthorsSection';
 import { Save, Key, RefreshCw, Shield, Clock, Zap } from 'lucide-react';
 import { useState } from 'react';
 
@@ -163,6 +164,9 @@ export default function Settings() {
             </Button>
           </div>
         </div>
+
+        {/* Tracked Authors Whitelist */}
+        <TrackedAuthorsSection />
 
         {/* Message Formatting */}
         <div className="glass-card rounded-xl p-6 space-y-4">
