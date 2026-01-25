@@ -4,7 +4,6 @@ import { ChannelList } from '@/components/dashboard/ChannelList';
 import { LiveLogs } from '@/components/dashboard/LiveLogs';
 import { ActivityChart } from '@/components/dashboard/ActivityChart';
 import { WorkerControlPanel } from '@/components/dashboard/WorkerControlPanel';
-import { MessageQueuePanel } from '@/components/dashboard/MessageQueuePanel';
 import { useChannels, useUpdateChannel } from '@/hooks/useChannels';
 import { useLogs, useRealtimeLogs } from '@/hooks/useLogs';
 import { useStats } from '@/hooks/useStats';
@@ -111,9 +110,6 @@ export default function Dashboard() {
           {/* Worker Control Panel */}
           <WorkerControlPanel />
         </div>
-
-        {/* Message Queue Panel */}
-        <MessageQueuePanel />
 
         {/* Quick Actions Row */}
         <div className="glass-card rounded-xl p-5 space-y-4">

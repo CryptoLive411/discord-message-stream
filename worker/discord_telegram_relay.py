@@ -204,8 +204,8 @@ class APIClient:
             logger.error(f"Failed to send heartbeat: {e}")
             return False
     
-    async def push_message(self, channel_id: str, message_data: dict) -> dict:
-        """Push a new message to the queue. Returns dict with 'success', 'duplicate', 'skipped' keys."""
+    async def push_message(self, channel_id: str, message_data: dict) -> bool:
+        """Push a new message to the queue."""
         try:
             response = await self.client.post(
                 f"{self.base_url}/worker-push",
@@ -219,15 +219,10 @@ class APIClient:
                 }
             )
             response.raise_for_status()
-            result = response.json()
-            return {
-                'success': result.get('success', False),
-                'duplicate': result.get('duplicate', False),
-                'skipped': result.get('skipped', False),
-            }
+            return True
         except Exception as e:
             logger.error(f"Failed to push message: {e}")
-            return {'success': False, 'duplicate': False, 'skipped': False}
+            return False
     
     async def mark_sent(self, message_id: str) -> bool:
         """Mark a message as successfully sent."""
@@ -751,13 +746,9 @@ class ChannelTab:
         self.channel_url = channel['url']
     
     def _generate_fingerprint(self, message_id: str) -> str:
-        """Generate a unique fingerprint for a message using only the Discord snowflake."""
-        # Extract just the snowflake (16-20 digit ID) from DOM element IDs like
-        # "chat-messages-123456-789012345678901234" to prevent duplicates from re-renders
-        snowflake_match = re.search(r'(\d{16,20})', message_id)
-        snowflake = snowflake_match.group(1) if snowflake_match else message_id
-        content = f"{self.channel_id}:{snowflake}"
-        return hashlib.md5(content.encode()).hexdigest()
+        """Generate a unique fingerprint for a message."""
+        content = f"{self.channel_id}:{message_id}"
+        return hashlib.sha256(content.encode()).hexdigest()[:32]
     
     async def _handle_new_message(self, message_json: str):
         """Callback when MutationObserver detects a new message."""
@@ -784,7 +775,7 @@ class ChannelTab:
             logger.info(f"[{self.channel_name}] New message from {author}: {raw_text[:50] if raw_text else '[attachment]'}...")
             
             # Push to queue immediately
-            result = await self.api.push_message(self.channel_id, {
+            success = await self.api.push_message(self.channel_id, {
                 'fingerprint': fingerprint,
                 'discord_message_id': msg['message_id'],
                 'author_name': author,
@@ -792,17 +783,10 @@ class ChannelTab:
                 'attachment_urls': msg['attachments']
             })
             
-            if result['success']:
-                if result['duplicate']:
-                    logger.debug(f"[{self.channel_name}] Duplicate message, skipping: {fingerprint[:8]}...")
-                    # Do NOT update cursor for duplicates - this prevents resetting to old fingerprints
-                elif result['skipped']:
-                    logger.info(f"[{self.channel_name}] Message skipped by parser (noise)")
-                    await self.api.set_channel_cursor(self.channel_id, fingerprint, msg.get('timestamp'))
-                else:
-                    await self.api.log('success', "Queued message", self.channel_name, f"From: {author} | Content: {raw_text[:80] if raw_text else '[attachment]'}")
-                    # Only update cursor for genuinely new messages
-                    await self.api.set_channel_cursor(self.channel_id, fingerprint, msg.get('timestamp'))
+            if success:
+                await self.api.log('success', "Queued message", self.channel_name, f"From: {author} | Content: {raw_text[:80] if raw_text else '[attachment]'}")
+                # Update cursor
+                await self.api.set_channel_cursor(self.channel_id, fingerprint, msg.get('timestamp'))
             
             # Notify main relay
             if self.on_message_callback:
@@ -1166,18 +1150,13 @@ class TelegramSender:
                         if dest['use_topics'] and channel and channel.get('telegram_topic_id'):
                             reply_to = int(channel['telegram_topic_id'])
                         
-                        # Track if we actually sent anything
-                        sent_something = False
-                        
-                        # Send text message
-                        if text and text.strip():
-                            await self.client.send_message(
-                                dest['entity'],
-                                text,
-                                reply_to=reply_to,
-                                parse_mode=None
-                            )
-                            sent_something = True
+                        # Send message
+                        await self.client.send_message(
+                            dest['entity'],
+                            text,
+                            reply_to=reply_to,
+                            parse_mode=None  # Send plain text
+                        )
                         
                         # Handle attachments
                         if attachments and channel and channel.get('mirror_attachments', True):
@@ -1188,18 +1167,12 @@ class TelegramSender:
                                         url,
                                         reply_to=reply_to
                                     )
-                                    sent_something = True
                                 except Exception as e:
                                     logger.warning(f"Failed to send attachment: {e}")
                         
-                        # Only mark as sent if we actually sent something
-                        if sent_something:
-                            await self.api.mark_sent(msg['id'])
-                            logger.info(f"Sent message to Telegram: {msg['id'][:8]}...")
-                        else:
-                            logger.info(f"Skipping empty formatted message {msg['id'][:8]}...")
-                            await self.api.mark_sent(msg['id'])  # Still mark as handled
-                        
+                        # Mark as sent
+                        await self.api.mark_sent(msg['id'])
+                        logger.info(f"Sent message to Telegram: {msg['id'][:8]}...")
                         await self.api.log('info', f"Sent message from {msg['author_name']}", channel_name)
                         
                     except Exception as e:
