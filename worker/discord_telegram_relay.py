@@ -594,13 +594,30 @@ class ChannelTab:
         
         // Set up MutationObserver
         function setupObserver() {
-            // Find the messages container
-            const container = document.querySelector('[class*="messagesWrapper-"]') ||
-                              document.querySelector('[class*="scrollerInner-"]') ||
-                              document.querySelector('main');
+            // Find the messages container - try multiple selectors for robustness
+            const containerSelectors = [
+                '[class*="messagesWrapper-"]',
+                '[class*="scrollerInner-"]',
+                '[class*="scroller-"][class*="content-"]',
+                '[data-list-id="chat-messages"]',
+                '[class*="chatContent-"]',
+                'ol[class*="scrollerInner-"]',
+                '[role="log"]',
+                'main [class*="chat-"]',
+                'main'
+            ];
+            
+            let container = null;
+            for (const sel of containerSelectors) {
+                container = document.querySelector(sel);
+                if (container) {
+                    console.log('[Observer] Found container with selector:', sel);
+                    break;
+                }
+            }
             
             if (!container) {
-                console.log('[Observer] No container found, retrying...');
+                console.log('[Observer] No container found, retrying... Tried:', containerSelectors.join(', '));
                 setTimeout(setupObserver, 1000);
                 return;
             }
