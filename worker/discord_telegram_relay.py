@@ -283,6 +283,7 @@ class ChannelTab:
             startupAtMs: Date.now(),
             lastDomChangeAt: Date.now(),
             quietPeriodMs: 2500,
+            maxPrimingMs: 12000,
         });
 
         const channelKey = location.pathname;
@@ -294,6 +295,7 @@ class ChannelTab:
             state.warmupUntil = Date.now() + 4000;
             state.startupAtMs = Date.now();
             state.lastDomChangeAt = Date.now();
+            state.maxPrimingMs = 12000;
             console.log('[Observer] Channel changed, state reset:', channelKey);
         }
 
@@ -349,9 +351,20 @@ class ChannelTab:
         function maybeLockBaseline() {
             if (state.baselineLocked) return;
             const quietFor = Date.now() - state.lastDomChangeAt;
+            // Normal lock: DOM has been quiet long enough and we have a parsed snowflake.
             if (quietFor >= state.quietPeriodMs && state.baselineSnowflake > 0n) {
                 state.baselineLocked = true;
                 console.log('[Observer] Baseline locked:', state.baselineSnowflake.toString(), `(quiet ${quietFor}ms)`);
+                return;
+            }
+
+            // Failsafe: Discord can keep mutating the DOM forever (typing indicators,
+            // lazy hydration, etc.), preventing a "quiet period". To avoid getting
+            // stuck and forwarding nothing, force-lock after maxPrimingMs.
+            const primingFor = Date.now() - state.startupAtMs;
+            if (primingFor >= state.maxPrimingMs) {
+                state.baselineLocked = true;
+                console.log('[Observer] Baseline force-locked after', primingFor + 'ms', state.baselineSnowflake > 0n ? `(baseline=${state.baselineSnowflake.toString()})` : '(baseline=0)');
             }
         }
         
@@ -363,6 +376,7 @@ class ChannelTab:
             // Otherwise late Discord hydration can look like "new messages".
             if (!state.baselineLocked) {
                 noteSeenMessageElement(element);
+                maybeLockBaseline();
                 return null;
             }
             
@@ -471,6 +485,7 @@ class ChannelTab:
                 if (isMessage) {
                     if (!state.baselineLocked) {
                         noteSeenMessageElement(node);
+                        maybeLockBaseline();
                         return;
                     }
                     const msg = extractMessage(node);
@@ -486,6 +501,7 @@ class ChannelTab:
                     childMessages.forEach(child => {
                         if (!state.baselineLocked) {
                             noteSeenMessageElement(child);
+                            maybeLockBaseline();
                             return;
                         }
                         const msg = extractMessage(child);
@@ -682,10 +698,15 @@ class ChannelTab:
                     baselineLocked: s.baselineLocked,
                     baselineSnowflake: (s.baselineSnowflake && s.baselineSnowflake.toString) ? s.baselineSnowflake.toString() : null,
                     startupAtMs: s.startupAtMs,
+                    maxPrimingMs: s.maxPrimingMs,
                     seenCount: s.seenMessages ? s.seenMessages.size : null,
                   };
                 }""")
                 logger.info(f"[{self.channel_name}] Observer state: {obs_state}")
+                try:
+                    await self.api.log('info', 'Observer state', self.channel_name, json.dumps(obs_state))
+                except Exception:
+                    pass
             except Exception as e:
                 logger.debug(f"[{self.channel_name}] Could not read observer state: {e}")
             
