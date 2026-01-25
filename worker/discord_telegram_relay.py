@@ -432,15 +432,9 @@ class ChannelTab:
                 }
             }
 
-            // If Discord somehow includes author decoration in extracted text, strip it.
-            if (content && author && author !== 'Unknown') {
-                const escaped = author.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                try {
-                    content = content.replace(new RegExp('^\\s*[\\p{Extended_Pictographic}\\s\\u200D\\uFE0F]*' + escaped + '\\s*:?\\s*', 'u'), '').trim();
-                } catch {
-                    // If unicode properties unsupported, fail open (keep content)
-                }
-            }
+            // Note: we intentionally do NOT try to strip author prefixes here with regex,
+            // because this script is embedded in a Python string and regex escaping is
+            // easy to break. We strip any "Author: ..." prefix in Python as a safety net.
             
             // Extract attachments
             const attachments = [];
