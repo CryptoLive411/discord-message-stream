@@ -662,28 +662,40 @@ class ChannelTab:
         // Wait for messages to appear before initializing
         function waitForInitialMessages(attempt = 0) {
             const messages = getMessageNodes();
-            if (messages.length > 0) {
+            if (messages.length > 0 || attempt >= 30) {
+                if (attempt >= 30) {
+                    console.log('[Observer] No messages found after wait; starting observer anyway');
+                }
                 setupObserver();
 
                 // Prime baseline aggressively until Discord settles.
                 primeBaselineFromExistingDom();
-                const primingInterval = setInterval(() => {
-                    if (state.baselineLocked) {
-                        clearInterval(primingInterval);
-                        return;
-                    }
-                    scrollToBottom();
-                    primeBaselineFromExistingDom();
-                    maybeLockBaseline();
-                }, 500);
-                return;
-            }
-            if (attempt >= 30) {
-                console.log('[Observer] No messages found after wait; starting observer anyway');
-                setupObserver();
+                
+                // CRITICAL: Start the baseline lock timer ALWAYS
+                startBaselineLockTimer();
                 return;
             }
             setTimeout(() => waitForInitialMessages(attempt + 1), 200);
+        }
+        
+        // Separate function to ensure baseline gets locked
+        function startBaselineLockTimer() {
+            const primingInterval = setInterval(() => {
+                if (state.baselineLocked) {
+                    console.log('[Observer] Priming complete, baseline locked');
+                    clearInterval(primingInterval);
+                    return;
+                }
+                scrollToBottom();
+                primeBaselineFromExistingDom();
+                maybeLockBaseline();
+                
+                // Log priming status periodically for debugging
+                const primingFor = Date.now() - state.startupAtMs;
+                if (primingFor > 5000 && primingFor % 2000 < 500) {
+                    console.log('[Observer] Still priming... elapsed:', primingFor + 'ms', 'baseline:', state.baselineSnowflake > 0n ? state.baselineSnowflake.toString() : '0');
+                }
+            }, 500);
         }
         
         // Initialize
