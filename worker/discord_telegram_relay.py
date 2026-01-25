@@ -594,6 +594,10 @@ class ChannelTab:
         
         // Set up MutationObserver
         function setupObserver() {
+            // Track container retry attempts
+            state.containerRetries = state.containerRetries || 0;
+            const maxContainerRetries = 30; // 30 seconds max waiting for container
+            
             // Find the messages container - try multiple selectors for robustness
             const containerSelectors = [
                 '[class*="messagesWrapper-"]',
@@ -604,6 +608,10 @@ class ChannelTab:
                 'ol[class*="scrollerInner-"]',
                 '[role="log"]',
                 'main [class*="chat-"]',
+                // More aggressive fallbacks
+                '[class*="messageListItem-"]',
+                '[id^="chat-messages-"]',
+                '[class*="message-"][class*="container-"]',
                 'main'
             ];
             
@@ -612,14 +620,23 @@ class ChannelTab:
                 container = document.querySelector(sel);
                 if (container) {
                     console.log('[Observer] Found container with selector:', sel);
+                    state.containerRetries = 0; // Reset on success
                     break;
                 }
             }
             
             if (!container) {
-                console.log('[Observer] No container found, retrying... Tried:', containerSelectors.join(', '));
-                setTimeout(setupObserver, 1000);
-                return;
+                state.containerRetries++;
+                if (state.containerRetries >= maxContainerRetries) {
+                    console.log('[Observer] FAILED to find container after', maxContainerRetries, 'attempts. Attaching to document.body as fallback.');
+                    container = document.body;
+                } else {
+                    if (state.containerRetries % 5 === 0) {
+                        console.log('[Observer] No container found, retrying...', state.containerRetries + '/' + maxContainerRetries);
+                    }
+                    setTimeout(setupObserver, 1000);
+                    return;
+                }
             }
 
             // Reattach cleanly on reinjection / DOM replacement.
@@ -801,15 +818,26 @@ class ChannelTab:
             # Expose Python callback to JavaScript
             await self.page.expose_function('__onNewMessage', self._handle_new_message)
             
-            # Navigate to channel
+            # Navigate to channel with retry logic
             logger.info(f"[{self.channel_name}] Opening channel tab...")
-            await self.page.goto(self.channel_url, wait_until='domcontentloaded')
+            max_nav_retries = 3
+            for nav_attempt in range(max_nav_retries):
+                try:
+                    await self.page.goto(self.channel_url, wait_until='domcontentloaded', timeout=60000)
+                    break
+                except Exception as nav_err:
+                    if nav_attempt < max_nav_retries - 1:
+                        logger.warning(f"[{self.channel_name}] Navigation timeout, retrying ({nav_attempt + 1}/{max_nav_retries})...")
+                        await asyncio.sleep(5)
+                    else:
+                        raise nav_err
             
-            # Wait for messages to load
+            # Wait for messages to load with multiple selector fallbacks
             try:
-                await self.page.wait_for_selector('[class*="messagesWrapper-"]', timeout=10000)
+                await self.page.wait_for_selector('[class*="messagesWrapper-"], [class*="chatContent-"], [data-list-id="chat-messages"]', timeout=15000)
             except:
-                await asyncio.sleep(2)
+                logger.warning(f"[{self.channel_name}] Message container not found via selector, waiting for page to settle...")
+                await asyncio.sleep(5)
             
             # Inject the observer script
             await self.page.evaluate(self.OBSERVER_SCRIPT)
