@@ -1154,14 +1154,18 @@ class TelegramSender:
                         if dest['use_topics'] and channel and channel.get('telegram_topic_id'):
                             reply_to = int(channel['telegram_topic_id'])
                         
+                        # Track if we actually sent anything
+                        sent_something = False
+                        
                         # Send text message
                         if text and text.strip():
                             await self.client.send_message(
                                 dest['entity'],
                                 text,
                                 reply_to=reply_to,
-                                parse_mode=None  # Send plain text
+                                parse_mode=None
                             )
+                            sent_something = True
                         
                         # Handle attachments
                         if attachments and channel and channel.get('mirror_attachments', True):
@@ -1172,12 +1176,18 @@ class TelegramSender:
                                         url,
                                         reply_to=reply_to
                                     )
+                                    sent_something = True
                                 except Exception as e:
                                     logger.warning(f"Failed to send attachment: {e}")
                         
-                        # Mark as sent
-                        await self.api.mark_sent(msg['id'])
-                        logger.info(f"Sent message to Telegram: {msg['id'][:8]}...")
+                        # Only mark as sent if we actually sent something
+                        if sent_something:
+                            await self.api.mark_sent(msg['id'])
+                            logger.info(f"Sent message to Telegram: {msg['id'][:8]}...")
+                        else:
+                            logger.info(f"Skipping empty formatted message {msg['id'][:8]}...")
+                            await self.api.mark_sent(msg['id'])  # Still mark as handled
+                        
                         await self.api.log('info', f"Sent message from {msg['author_name']}", channel_name)
                         
                     except Exception as e:
