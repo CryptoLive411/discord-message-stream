@@ -43,9 +43,14 @@ export function TrackedAuthorsSection() {
       {/* Info banner */}
       <div className="flex items-start gap-2 p-3 rounded-lg bg-muted/50 border border-border">
         <Info className="w-4 h-4 text-muted-foreground mt-0.5 shrink-0" />
-        <p className="text-xs text-muted-foreground">
-          When this list is empty, all messages are relayed. Add usernames to only relay messages from specific Discord users.
-        </p>
+        <div className="text-xs text-muted-foreground space-y-1">
+          <p>
+            <strong>Use the Display Name</strong> shown in Discord messages (e.g., "RoroCrypto", "Yezz94"), not the @username.
+          </p>
+          <p>
+            Matching is case-insensitive. When this list is empty, all messages are relayed.
+          </p>
+        </div>
       </div>
 
       {/* Add new author */}
@@ -53,7 +58,7 @@ export function TrackedAuthorsSection() {
         <div className="flex gap-2">
           <div className="flex-1">
             <Input
-              placeholder="Discord username (e.g., CryptoKing)"
+              placeholder="Display name (e.g., RoroCrypto)"
               value={newUsername}
               onChange={(e) => setNewUsername(e.target.value)}
               onKeyDown={handleKeyDown}
