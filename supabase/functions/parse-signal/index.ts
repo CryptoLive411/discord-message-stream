@@ -222,18 +222,10 @@ function fallbackParse(messageText: string, authorName: string): ParsedSignal {
   return { type: "skip", formatted: null };
 }
 
-function formatSignal(parsed: any, authorName: string): string {
+function formatSignal(parsed: any, _authorName: string): string {
   if (parsed.type === "ca") {
-    let msg = "";
-    if (parsed.token) {
-      msg += `🪙 ${parsed.token}\n`;
-    }
-    msg += `\n\`${parsed.contractAddress}\``;
-    if (parsed.context) {
-      msg += `\n\n💬 ${parsed.context}`;
-    }
-    msg += `\n\n👤 ${authorName}`;
-    return msg;
+    // Just the CA, clean and simple for quick copy
+    return `${parsed.contractAddress}`;
   }
   
   if (parsed.type === "leverage_trade") {
@@ -245,57 +237,37 @@ function formatSignal(parsed: any, authorName: string): string {
     if (parsed.leverage) {
       msg += ` (${parsed.leverage})`;
     }
-    msg += "\n";
     if (parsed.entry) {
-      msg += `\n📍 Entry: ${parsed.entry}`;
+      msg += `\nEntry: ${parsed.entry}`;
     }
     if (parsed.stopLoss) {
-      msg += `\n🛑 SL: ${parsed.stopLoss}`;
+      msg += `\nSL: ${parsed.stopLoss}`;
     }
     if (parsed.takeProfit?.length) {
       parsed.takeProfit.forEach((tp: string, i: number) => {
-        msg += `\n🎯 TP${i + 1}: ${tp}`;
+        msg += `\nTP${i + 1}: ${tp}`;
       });
     }
-    msg += `\n\n👤 ${authorName}`;
     return msg;
   }
   
   if (parsed.type === "alpha_call") {
-    let msg = `🚀 ALPHA`;
-    if (parsed.token) {
-      msg += ` #${parsed.token}`;
-    }
+    // Just the CA if present, otherwise skip
     if (parsed.contractAddress) {
-      msg += `\n\n\`${parsed.contractAddress}\``;
+      return `${parsed.contractAddress}`;
     }
-    if (parsed.context) {
-      msg += `\n\n💬 ${parsed.context}`;
-    }
-    msg += `\n\n👤 ${authorName}`;
-    return msg;
+    return "";
   }
   
-  return parsed.context || "";
+  return "";
 }
 
-function formatCASignal(ca: string, originalMessage: string, authorName: string): string {
-  // Try to extract token name from message
-  const tokenMatch = originalMessage.match(/\$([A-Z]{2,10})/i) || 
-                     originalMessage.match(/([A-Z]{2,10})\/SOL/i) ||
-                     originalMessage.match(/([A-Z]{2,10})\/ETH/i);
-  const token = tokenMatch?.[1];
-  
-  let msg = "";
-  if (token) {
-    msg += `🪙 $${token.toUpperCase()}\n`;
-  }
-  msg += `\n\`${ca}\``;
-  msg += `\n\n👤 ${authorName}`;
-  return msg;
+function formatCASignal(ca: string, _originalMessage: string, _authorName: string): string {
+  // Just the CA, clean for quick copy
+  return ca;
 }
 
-function formatLeverageTrade(messageText: string, authorName: string): string {
+function formatLeverageTrade(messageText: string, _authorName: string): string {
   const isLong = /long/i.test(messageText);
   const isShort = /short/i.test(messageText);
   const emoji = isShort ? "🔴" : "🟢";
@@ -318,9 +290,8 @@ function formatLeverageTrade(messageText: string, authorName: string): string {
     msg += ` (${leverage})`;
   }
   
-  // Include original message for context since we can't reliably parse all formats
+  // Include original message for context
   msg += `\n\n${messageText}`;
-  msg += `\n\n👤 ${authorName}`;
   
   return msg;
 }
