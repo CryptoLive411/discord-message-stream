@@ -1,20 +1,29 @@
 import { useState } from 'react';
-import { Users, Plus, X, Info } from 'lucide-react';
+import { Users, Plus, X, Info, UserPlus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { Badge } from '@/components/ui/badge';
 import { useTrackedAuthors } from '@/hooks/useTrackedAuthors';
+import { useRecentAuthors } from '@/hooks/useRecentAuthors';
 
 export function TrackedAuthorsSection() {
   const [newUsername, setNewUsername] = useState('');
   const [newNotes, setNewNotes] = useState('');
   const { authors, isLoading, addAuthor, removeAuthor } = useTrackedAuthors();
+  const { data: recentAuthors = [] } = useRecentAuthors();
 
-  const handleAdd = () => {
-    if (!newUsername.trim()) return;
-    addAuthor.mutate({ username: newUsername, notes: newNotes });
+  // Filter out already tracked authors from suggestions
+  const trackedLower = authors.map(a => a.username.toLowerCase());
+  const suggestions = recentAuthors.filter(
+    a => !trackedLower.includes(a.name.toLowerCase())
+  );
+
+  const handleAdd = (username?: string) => {
+    const nameToAdd = username || newUsername.trim();
+    if (!nameToAdd) return;
+    addAuthor.mutate({ username: nameToAdd, notes: newNotes });
     setNewUsername('');
     setNewNotes('');
   };
@@ -48,10 +57,33 @@ export function TrackedAuthorsSection() {
             <strong>Use the Display Name</strong> shown in Discord messages (e.g., "RoroCrypto", "Yezz94"), not the @username.
           </p>
           <p>
-            Matching is case-insensitive. When this list is empty, all messages are relayed.
+            Matching is case-insensitive. When this list is empty, all messages are relayed. "Unknown" authors always pass through.
           </p>
         </div>
       </div>
+
+      {/* Recent authors quick-add */}
+      {suggestions.length > 0 && (
+        <div className="space-y-2">
+          <Label className="text-xs text-muted-foreground uppercase tracking-wide">
+            Recent Authors (click to add)
+          </Label>
+          <div className="flex flex-wrap gap-1.5">
+            {suggestions.slice(0, 10).map((author) => (
+              <button
+                key={author.name}
+                onClick={() => handleAdd(author.name)}
+                disabled={addAuthor.isPending}
+                className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-secondary/50 hover:bg-primary/20 border border-border hover:border-primary/50 transition-colors text-xs font-mono"
+              >
+                <UserPlus className="w-3 h-3 text-primary" />
+                {author.name}
+                <span className="text-muted-foreground">({author.count})</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Add new author */}
       <div className="space-y-3">
@@ -66,7 +98,7 @@ export function TrackedAuthorsSection() {
             />
           </div>
           <Button 
-            onClick={handleAdd} 
+            onClick={() => handleAdd()} 
             disabled={!newUsername.trim() || addAuthor.isPending}
             size="icon"
           >
@@ -120,3 +152,4 @@ export function TrackedAuthorsSection() {
     </div>
   );
 }
+
