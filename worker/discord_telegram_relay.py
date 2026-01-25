@@ -272,6 +272,10 @@ class ChannelTab:
         if (window.__discordObserverActive) return;
         window.__discordObserverActive = true;
         
+        // CRITICAL: Record the exact moment the bot started
+        // This is the PRIMARY filter - only messages arriving AFTER this time are processed
+        const BOT_START_TIME = Date.now();
+        
         // Use window-level storage to persist across re-injections
         if (!window.__discordObserverState) {
             window.__discordObserverState = {
@@ -279,9 +283,13 @@ class ChannelTab:
                 initialMaxSnowflake: 0n,
                 hasInitialMaxSnowflake: false,
                 isInitialized: false,
-                // Warmup window: 10 seconds to let Discord fully hydrate
-                warmupUntil: Date.now() + 10000
+                botStartTime: BOT_START_TIME,
+                // Warmup window: 15 seconds to let Discord fully hydrate all existing messages
+                warmupUntil: BOT_START_TIME + 15000,
+                // Track first mutation after warmup
+                firstMutationAfterWarmup: null
             };
+            console.log('[Observer] Bot started at:', new Date(BOT_START_TIME).toISOString());
         }
         
         const state = window.__discordObserverState;
@@ -289,13 +297,9 @@ class ChannelTab:
         let lastProcessedId = null;
         
         function parseSnowflakeFromMessageId(id) {
-            // Examples we may see:
-            // - "chat-messages-<channelId>-<messageSnowflake>"
-            // - data-list-item-id like "chat-messages___<messageSnowflake>" (varies)
             if (!id) return null;
-            const matches = id.match(/(\d{16,20})/g);
+            const matches = id.match(/(\\d{16,20})/g);
             if (!matches || matches.length === 0) return null;
-            // Take the last long numeric token as the message snowflake.
             const token = matches[matches.length - 1];
             try {
                 return BigInt(token);
@@ -306,18 +310,17 @@ class ChannelTab:
 
         function isDiscordAttachmentUrl(url) {
             if (!url) return false;
-            // Only accept real message attachments; exclude avatars, decorations, stickers, etc.
-            return /https?:\/\/(cdn\.discordapp\.com|media\.discordapp\.net)\/(attachments|ephemeral-attachments)\//.test(url);
+            return /https?:\\/\\/(cdn\\.discordapp\\.com|media\\.discordapp\\.net)\\/(attachments|ephemeral-attachments)\\//.test(url);
         }
 
         // Initialize with existing messages to avoid backfill
         function initializeSeenMessages() {
-            // Skip if already initialized (prevents re-scanning on observer re-injection)
             if (state.isInitialized) {
                 console.log('[Observer] Already initialized, skipping re-scan');
                 return;
             }
             
+            // Mark ALL currently visible messages as "seen" - these existed before bot started
             const messages = document.querySelectorAll('[id^="chat-messages-"], [data-list-item-id^="chat-messages-"]');
             messages.forEach(msg => {
                 const id = msg.id || msg.getAttribute('data-list-item-id');
@@ -331,46 +334,53 @@ class ChannelTab:
                     }
                 }
             });
-            if (messages.length > 0) {
-                lastProcessedId = messages[messages.length - 1].id;
-            }
             
-            // Mark as initialized - this is THE critical flag
             state.isInitialized = true;
-            
-            console.log('[Observer] Initialized with', seenMessages.size, 'existing messages', state.hasInitialMaxSnowflake ? `(initialMax=${state.initialMaxSnowflake.toString()})` : '(no snowflake parsed)');
+            console.log('[Observer] Initialized - marked', seenMessages.size, 'existing messages as seen');
+            console.log('[Observer] Initial max snowflake:', state.hasInitialMaxSnowflake ? state.initialMaxSnowflake.toString() : 'none');
+            console.log('[Observer] Will only process messages arriving after warmup ends at:', new Date(state.warmupUntil).toISOString());
         }
         
         // Extract message data from a DOM element
         function extractMessage(element) {
             const id = element.id || element.getAttribute('data-list-item-id');
-            if (!id || seenMessages.has(id)) return null;
             
+            // Skip if already seen
+            if (!id || seenMessages.has(id)) return null;
             seenMessages.add(id);
+            
+            const now = Date.now();
 
-            // CRITICAL: Block ALL messages until fully initialized
+            // GUARD 1: Block ALL messages until initialization is complete
             if (!state.isInitialized) {
-                console.log('[Observer] Skipping pre-init message:', id);
+                console.log('[Observer] BLOCKED (pre-init):', id);
                 return null;
             }
 
-            // Hard backfill prevention: ignore any message older/equal to newest message at startup.
+            // GUARD 2: Block ALL messages during warmup period (15 seconds)
+            // This is the PRIMARY defense against backfill
+            if (now < state.warmupUntil) {
+                console.log('[Observer] BLOCKED (warmup):', id, '- warmup ends in', Math.round((state.warmupUntil - now)/1000), 'sec');
+                return null;
+            }
+
+            // GUARD 3: Snowflake-based check - reject anything older than initial max
             if (state.hasInitialMaxSnowflake) {
                 const snowflake = parseSnowflakeFromMessageId(id);
                 if (snowflake !== null && snowflake <= state.initialMaxSnowflake) {
-                    console.log('[Observer] Skipping old message (snowflake):', id);
+                    console.log('[Observer] BLOCKED (old snowflake):', id);
                     return null;
                 }
-                // If it is newer, advance our cursor so we keep moving forward.
+                // Advance cursor for new messages
                 if (snowflake !== null && snowflake > state.initialMaxSnowflake) {
                     state.initialMaxSnowflake = snowflake;
                 }
             }
             
-            // Ignore anything that appears during initial hydration / warmup.
-            if (Date.now() < state.warmupUntil) {
-                console.log('[Observer] Skipping warmup message:', id);
-                return null;
+            // Log first message after warmup
+            if (!state.firstMutationAfterWarmup) {
+                state.firstMutationAfterWarmup = now;
+                console.log('[Observer] First message AFTER warmup at:', new Date(now).toISOString());
             }
             
             // Extract author
