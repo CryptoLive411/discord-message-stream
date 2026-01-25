@@ -3,12 +3,13 @@
 Discord to Telegram Mirror Relay Worker
 ========================================
 Watches Discord channels via browser automation (Playwright) using MutationObserver
-for real-time message detection, and relays messages to Telegram via MTProto (Telethon).
+for real-time message detection, and relays messages to Telegram via Bot API.
 
 Architecture:
 - Opens one browser tab per Discord channel
 - Injects MutationObserver to detect new messages instantly (<100ms)
 - No polling — event-driven message detection
+- Uses Telegram Bot API (not user account) to avoid bans
 
 Run with: python discord_telegram_relay.py
 """
@@ -28,8 +29,6 @@ from typing import Optional
 import httpx
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright, Browser, Page, BrowserContext
-from telethon import TelegramClient
-from telethon.tl.types import InputPeerChannel, InputPeerChat
 
 # Load environment variables
 load_dotenv()
@@ -54,9 +53,7 @@ class Config:
     """Application configuration from environment variables."""
     worker_api_key: str
     supabase_url: str
-    telegram_api_id: int
-    telegram_api_hash: str
-    telegram_session_name: str = "discord_mirror_session"
+    telegram_bot_token: str
     channel_refresh_interval: int = 60  # seconds between checking for new/removed channels
     headless: bool = True   # Run browser in headless mode
     browser_profile_path: str = "./discord_profile"
@@ -64,7 +61,7 @@ class Config:
     @classmethod
     def from_env(cls) -> 'Config':
         """Load configuration from environment variables."""
-        required = ['WORKER_API_KEY', 'SUPABASE_URL', 'TELEGRAM_API_ID', 'TELEGRAM_API_HASH']
+        required = ['WORKER_API_KEY', 'SUPABASE_URL', 'TELEGRAM_BOT_TOKEN']
         missing = [key for key in required if not os.getenv(key)]
         if missing:
             raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
@@ -72,9 +69,7 @@ class Config:
         return cls(
             worker_api_key=os.getenv('WORKER_API_KEY'),
             supabase_url=os.getenv('SUPABASE_URL'),
-            telegram_api_id=int(os.getenv('TELEGRAM_API_ID')),
-            telegram_api_hash=os.getenv('TELEGRAM_API_HASH'),
-            telegram_session_name=os.getenv('TELEGRAM_SESSION_NAME', 'discord_mirror_session'),
+            telegram_bot_token=os.getenv('TELEGRAM_BOT_TOKEN'),
             channel_refresh_interval=int(os.getenv('CHANNEL_REFRESH_INTERVAL', '60')),
             headless=os.getenv('HEADLESS', 'true').lower() == 'true',
             browser_profile_path=os.getenv('BROWSER_PROFILE_PATH', './discord_profile'),
@@ -712,36 +707,48 @@ class DiscordWatcher:
         logger.info("Discord watcher stopped")
 
 # ============================================================================
-# Telegram Sender (Telethon)
+# Telegram Sender (Bot API)
 # ============================================================================
 
 class TelegramSender:
-    """Sends messages to Telegram using Telethon (MTProto)."""
+    """Sends messages to Telegram using Bot API."""
     
     def __init__(self, config: Config, api: APIClient):
         self.config = config
         self.api = api
-        self.client: Optional[TelegramClient] = None
+        self.http_client: Optional[httpx.AsyncClient] = None
         self.running = False
-        self.destination = None
+        self.bot_api_url = f"https://api.telegram.org/bot{config.telegram_bot_token}"
+        self.bot_info = None
     
     async def start(self):
-        """Start the Telegram client and authenticate."""
-        logger.info("Starting Telegram sender...")
+        """Start the Telegram bot client."""
+        logger.info("Starting Telegram sender (Bot API mode)...")
         
-        self.client = TelegramClient(
-            self.config.telegram_session_name,
-            self.config.telegram_api_id,
-            self.config.telegram_api_hash
-        )
+        self.http_client = httpx.AsyncClient(timeout=30.0)
         
-        await self.client.start()
-        
-        me = await self.client.get_me()
-        logger.info(f"Logged in to Telegram as: {me.first_name} (@{me.username})")
-        
-        await self.api.update_connection_status('telegram', 'connected')
-        await self.api.log('info', f'Telegram connected as {me.first_name}')
+        # Verify bot token by getting bot info
+        try:
+            response = await self.http_client.get(f"{self.bot_api_url}/getMe")
+            response.raise_for_status()
+            data = response.json()
+            
+            if not data.get('ok'):
+                raise ValueError(f"Bot API error: {data.get('description', 'Unknown error')}")
+            
+            self.bot_info = data['result']
+            bot_name = self.bot_info.get('first_name', 'Unknown')
+            bot_username = self.bot_info.get('username', 'unknown')
+            
+            logger.info(f"Logged in as bot: {bot_name} (@{bot_username})")
+            
+            await self.api.update_connection_status('telegram', 'connected')
+            await self.api.log('info', f'Telegram bot connected as @{bot_username}')
+            
+        except Exception as e:
+            logger.error(f"Failed to connect to Telegram Bot API: {e}")
+            await self.api.update_connection_status('telegram', 'error', str(e))
+            raise
         
         self.running = True
         logger.info("Telegram sender ready!")
@@ -754,30 +761,96 @@ class TelegramSender:
             return None
         
         identifier = config.get('identifier')
-        dest_type = config.get('destination_type')
         use_topics = config.get('use_topics', False)
         
-        try:
-            # Parse the identifier (can be username, group ID, or channel ID)
-            if identifier.startswith('@'):
-                entity = await self.client.get_entity(identifier)
-            elif identifier.startswith('-100'):
-                entity = await self.client.get_entity(int(identifier))
-            else:
-                entity = await self.client.get_entity(int(identifier))
-            
-            return {
-                'entity': entity,
-                'use_topics': use_topics,
-                'config': config
-            }
-        except Exception as e:
-            logger.error(f"Failed to resolve Telegram destination: {e}")
-            return None
+        # For Bot API, we just need the chat_id (group/channel ID)
+        # It can be @username or numeric ID (negative for groups/channels)
+        chat_id = identifier
+        
+        return {
+            'chat_id': chat_id,
+            'use_topics': use_topics,
+            'config': config
+        }
     
     async def _format_message(self, msg: dict, channel_name: str) -> str:
         """Format a message for Telegram - text only, no username."""
         return (msg.get('message_text') or '').strip()
+    
+    async def _send_message(self, chat_id: str, text: str, message_thread_id: Optional[int] = None) -> bool:
+        """Send a text message via Bot API."""
+        try:
+            payload = {
+                'chat_id': chat_id,
+                'text': text,
+            }
+            if message_thread_id:
+                payload['message_thread_id'] = message_thread_id
+            
+            response = await self.http_client.post(
+                f"{self.bot_api_url}/sendMessage",
+                json=payload
+            )
+            data = response.json()
+            
+            if not data.get('ok'):
+                logger.error(f"Bot API sendMessage error: {data.get('description')}")
+                return False
+            
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send message: {e}")
+            return False
+    
+    async def _send_photo(self, chat_id: str, photo_url: str, message_thread_id: Optional[int] = None) -> bool:
+        """Send a photo via Bot API."""
+        try:
+            payload = {
+                'chat_id': chat_id,
+                'photo': photo_url,
+            }
+            if message_thread_id:
+                payload['message_thread_id'] = message_thread_id
+            
+            response = await self.http_client.post(
+                f"{self.bot_api_url}/sendPhoto",
+                json=payload
+            )
+            data = response.json()
+            
+            if not data.get('ok'):
+                logger.error(f"Bot API sendPhoto error: {data.get('description')}")
+                return False
+            
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send photo: {e}")
+            return False
+    
+    async def _send_document(self, chat_id: str, document_url: str, message_thread_id: Optional[int] = None) -> bool:
+        """Send a document via Bot API."""
+        try:
+            payload = {
+                'chat_id': chat_id,
+                'document': document_url,
+            }
+            if message_thread_id:
+                payload['message_thread_id'] = message_thread_id
+            
+            response = await self.http_client.post(
+                f"{self.bot_api_url}/sendDocument",
+                json=payload
+            )
+            data = response.json()
+            
+            if not data.get('ok'):
+                logger.error(f"Bot API sendDocument error: {data.get('description')}")
+                return False
+            
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send document: {e}")
+            return False
     
     async def send_pending_messages(self):
         """Main loop to send pending messages."""
@@ -795,6 +868,8 @@ class TelegramSender:
                     logger.warning("No Telegram destination configured")
                     await asyncio.sleep(10)
                     continue
+                
+                chat_id = dest['chat_id']
                 
                 # Fetch channels once per batch (avoid N calls)
                 channels = await self.api.get_channels()
@@ -816,27 +891,26 @@ class TelegramSender:
                         text = await self._format_message(msg, channel_name)
                         
                         # Determine topic ID if using topics
-                        reply_to = None
+                        message_thread_id = None
                         if dest['use_topics'] and channel and channel.get('telegram_topic_id'):
-                            reply_to = int(channel['telegram_topic_id'])
+                            message_thread_id = int(channel['telegram_topic_id'])
                         
-                        # Send message
-                        await self.client.send_message(
-                            dest['entity'],
-                            text,
-                            reply_to=reply_to,
-                            parse_mode=None  # Send plain text
-                        )
+                        # Send text message if there's text
+                        if text:
+                            success = await self._send_message(chat_id, text, message_thread_id)
+                            if not success:
+                                await self.api.mark_failed(msg['id'], 'Failed to send message via Bot API')
+                                continue
                         
                         # Handle attachments
                         if attachments and channel and channel.get('mirror_attachments', True):
                             for url in attachments[:5]:  # Limit to 5 attachments
                                 try:
-                                    await self.client.send_file(
-                                        dest['entity'],
-                                        url,
-                                        reply_to=reply_to
-                                    )
+                                    # Determine if it's an image or other file
+                                    if any(ext in url.lower() for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
+                                        await self._send_photo(chat_id, url, message_thread_id)
+                                    else:
+                                        await self._send_document(chat_id, url, message_thread_id)
                                 except Exception as e:
                                     logger.warning(f"Failed to send attachment: {e}")
                         
@@ -859,10 +933,10 @@ class TelegramSender:
             await asyncio.sleep(0.2)  # Fast loop
     
     async def stop(self):
-        """Stop the sender and disconnect."""
+        """Stop the sender and close HTTP client."""
         self.running = False
-        if self.client:
-            await self.client.disconnect()
+        if self.http_client:
+            await self.http_client.aclose()
         logger.info("Telegram sender stopped")
 
 # ============================================================================
