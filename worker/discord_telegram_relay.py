@@ -864,6 +864,7 @@ class DiscordWatcher:
         self.message_queue = asyncio.Queue()
         self.tracked_authors: list[str] = []  # Global whitelist (empty = all messages)
         self.banned_authors: list[str] = []   # Global blacklist (always skip)
+        self._keepalive_page: Optional[Page] = None  # Keep browser context alive
     
     async def start(self):
         """Start the browser and login to Discord."""
@@ -901,8 +902,11 @@ class DiscordWatcher:
             else:
                 raise Exception("Discord login timeout - please run in non-headless mode to login")
         
-        # Close the login check page
-        await page.close()
+        # Keep this page alive to prevent context from closing
+        # Navigate to a simple page to reduce resource usage
+        await page.goto('about:blank')
+        self._keepalive_page = page
+        logger.info("Browser context initialized with keepalive page")
         
         await self.api.update_connection_status('discord', 'connected')
         await self.api.log('info', 'Discord watcher connected (real-time MutationObserver mode)')
@@ -924,16 +928,25 @@ class DiscordWatcher:
             await self.tabs[cid].stop()
             del self.tabs[cid]
         
-        # Open tabs for new channels
-        for cid, channel in enabled_channels.items():
-            if cid not in self.tabs:
-                logger.info(f"Opening tab for new channel: {channel['name']}")
-                tab = ChannelTab(channel, self.context, self.api, self._on_message, self._get_tracked_authors, self._get_banned_authors)
-                self.tabs[cid] = tab
-                # Start tab in background
-                asyncio.create_task(tab.start())
+        # Open tabs for new channels (staggered to avoid overwhelming browser)
+        new_channels = [(cid, channel) for cid, channel in enabled_channels.items() if cid not in self.tabs]
+        for i, (cid, channel) in enumerate(new_channels):
+            logger.info(f"Opening tab for new channel: {channel['name']}")
+            tab = ChannelTab(channel, self.context, self.api, self._on_message, self._get_tracked_authors, self._get_banned_authors)
+            self.tabs[cid] = tab
+            # Start tab in background with staggered delay
+            asyncio.create_task(self._start_tab_with_delay(tab, i * 0.5))
         
         return len(self.tabs)
+    
+    async def _start_tab_with_delay(self, tab: ChannelTab, delay: float):
+        """Start a tab after a delay to avoid overwhelming the browser."""
+        if delay > 0:
+            await asyncio.sleep(delay)
+        try:
+            await tab.start()
+        except Exception as e:
+            logger.error(f"[{tab.channel_name}] Failed to start tab: {e}")
     
     async def _refresh_tracked_authors(self):
         """Fetch latest tracked authors whitelist and banned authors blacklist."""
@@ -988,6 +1001,14 @@ class DiscordWatcher:
         for tab in self.tabs.values():
             await tab.stop()
         self.tabs.clear()
+        
+        # Close keepalive page
+        if self._keepalive_page:
+            try:
+                await self._keepalive_page.close()
+            except Exception:
+                pass
+            self._keepalive_page = None
         
         # Close browser context
         if self.context:
