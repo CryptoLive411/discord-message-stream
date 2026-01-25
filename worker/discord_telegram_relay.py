@@ -279,21 +279,55 @@ class ChannelTab:
         
         const seenMessages = new Set();
         let lastProcessedId = null;
+        // Track the newest (max) Discord snowflake we see at init time.
+        // Anything older/equal is treated as history/backfill and ignored.
+        let initialMaxSnowflake = 0n;
+        let hasInitialMaxSnowflake = false;
         // Warmup window: Discord hydrates existing messages after navigation.
         // During this time, we record IDs but do NOT forward anything.
         let warmupUntil = Date.now() + 4000;
         
+        function parseSnowflakeFromMessageId(id) {
+            // Examples we may see:
+            // - "chat-messages-<channelId>-<messageSnowflake>"
+            // - data-list-item-id like "chat-messages___<messageSnowflake>" (varies)
+            if (!id) return null;
+            const matches = id.match(/(\d{16,20})/g);
+            if (!matches || matches.length === 0) return null;
+            // Take the last long numeric token as the message snowflake.
+            const token = matches[matches.length - 1];
+            try {
+                return BigInt(token);
+            } catch {
+                return null;
+            }
+        }
+
+        function isDiscordAttachmentUrl(url) {
+            if (!url) return false;
+            // Only accept real message attachments; exclude avatars, decorations, stickers, etc.
+            return /https?:\/\/(cdn\.discordapp\.com|media\.discordapp\.net)\/(attachments|ephemeral-attachments)\//.test(url);
+        }
+
         // Initialize with existing messages to avoid backfill
         function initializeSeenMessages() {
             const messages = document.querySelectorAll('[id^="chat-messages-"], [data-list-item-id^="chat-messages-"]');
             messages.forEach(msg => {
                 const id = msg.id || msg.getAttribute('data-list-item-id');
                 if (id) seenMessages.add(id);
+
+                const snowflake = parseSnowflakeFromMessageId(id);
+                if (snowflake !== null) {
+                    if (!hasInitialMaxSnowflake || snowflake > initialMaxSnowflake) {
+                        initialMaxSnowflake = snowflake;
+                        hasInitialMaxSnowflake = true;
+                    }
+                }
             });
             if (messages.length > 0) {
                 lastProcessedId = messages[messages.length - 1].id;
             }
-            console.log('[Observer] Initialized with', seenMessages.size, 'existing messages');
+            console.log('[Observer] Initialized with', seenMessages.size, 'existing messages', hasInitialMaxSnowflake ? `(initialMax=${initialMaxSnowflake.toString()})` : '(no snowflake parsed)');
         }
         
         // Extract message data from a DOM element
@@ -302,6 +336,18 @@ class ChannelTab:
             if (!id || seenMessages.has(id)) return null;
             
             seenMessages.add(id);
+
+            // Hard backfill prevention: ignore any message older/equal to newest message at startup.
+            if (hasInitialMaxSnowflake) {
+                const snowflake = parseSnowflakeFromMessageId(id);
+                if (snowflake !== null && snowflake <= initialMaxSnowflake) {
+                    return null;
+                }
+                // If it is newer, advance our cursor so we keep moving forward.
+                if (snowflake !== null && snowflake > initialMaxSnowflake) {
+                    initialMaxSnowflake = snowflake;
+                }
+            }
             
             // Ignore anything that appears during initial hydration / warmup.
             if (Date.now() < warmupUntil) {
@@ -343,11 +389,13 @@ class ChannelTab:
             
             // Extract attachments
             const attachments = [];
-            element.querySelectorAll('a[class*="imageWrapper-"], a[href*="cdn.discordapp.com"]').forEach(a => {
-                if (a.href) attachments.push(a.href);
+            element.querySelectorAll('a[href]').forEach(a => {
+                const url = a.href;
+                if (isDiscordAttachmentUrl(url)) attachments.push(url);
             });
-            element.querySelectorAll('img[src*="cdn.discordapp.com"]').forEach(img => {
-                if (img.src && !attachments.includes(img.src)) attachments.push(img.src);
+            element.querySelectorAll('img[src]').forEach(img => {
+                const url = img.src;
+                if (isDiscordAttachmentUrl(url) && !attachments.includes(url)) attachments.push(url);
             });
             
             // Skip empty messages
