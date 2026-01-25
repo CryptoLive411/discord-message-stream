@@ -171,6 +171,54 @@ class APIClient:
             logger.error(f"Failed to fetch banned authors: {e}")
             return []
     
+    async def get_pending_commands(self) -> list[dict]:
+        """Fetch pending commands from the dashboard."""
+        try:
+            response = await self.client.get(
+                f"{self.base_url}/worker-pull",
+                params={"action": "get_pending_commands"},
+                headers=self.headers
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data.get('commands', [])
+        except Exception as e:
+            logger.error(f"Failed to fetch pending commands: {e}")
+            return []
+    
+    async def ack_command(self, command_id: str, result: str, success: bool) -> bool:
+        """Acknowledge a command has been processed."""
+        try:
+            response = await self.client.post(
+                f"{self.base_url}/worker-pull",
+                params={"action": "ack_command"},
+                headers=self.headers,
+                json={
+                    "commandId": command_id,
+                    "result": result,
+                    "success": success
+                }
+            )
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to acknowledge command: {e}")
+            return False
+    
+    async def send_heartbeat(self) -> bool:
+        """Send a heartbeat to indicate worker is alive."""
+        try:
+            response = await self.client.get(
+                f"{self.base_url}/worker-pull",
+                params={"action": "heartbeat"},
+                headers=self.headers
+            )
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send heartbeat: {e}")
+            return False
+    
     async def push_message(self, channel_id: str, message_data: dict) -> bool:
         """Push a new message to the queue."""
         try:
@@ -1134,14 +1182,56 @@ class DiscordTelegramRelay:
             raise
     
     async def _heartbeat(self):
-        """Send periodic heartbeats."""
+        """Send periodic heartbeats and check for commands."""
         while self.running:
             try:
+                # Send heartbeat to indicate worker is alive
+                await self.api.send_heartbeat()
                 await self.api.update_connection_status('discord', 'connected')
                 await self.api.update_connection_status('telegram', 'connected')
+                
+                # Check for pending commands
+                commands = await self.api.get_pending_commands()
+                for cmd in commands:
+                    await self._process_command(cmd)
+                    
             except Exception as e:
                 logger.debug(f"Heartbeat error: {e}")
-            await asyncio.sleep(30)
+            await asyncio.sleep(10)  # Check every 10 seconds
+    
+    async def _process_command(self, cmd: dict):
+        """Process a command from the dashboard."""
+        command = cmd.get('command')
+        command_id = cmd.get('id')
+        
+        logger.info(f"Received command: {command}")
+        await self.api.log('info', f'Processing command: {command}')
+        
+        try:
+            if command == 'stop':
+                await self.api.ack_command(command_id, 'Stopping worker...', True)
+                await self.stop()
+                
+            elif command == 'restart':
+                await self.api.ack_command(command_id, 'Restarting worker...', True)
+                await self.stop()
+                # Note: systemd will restart the service automatically
+                
+            elif command == 'sync_channels':
+                # Force a channel sync
+                await self.discord_watcher.sync_channels()
+                await self.api.ack_command(command_id, 'Channels synced', True)
+                
+            elif command == 'start':
+                # Already running, just acknowledge
+                await self.api.ack_command(command_id, 'Worker already running', True)
+                
+            else:
+                await self.api.ack_command(command_id, f'Unknown command: {command}', False)
+                
+        except Exception as e:
+            logger.error(f"Error processing command {command}: {e}")
+            await self.api.ack_command(command_id, f'Error: {e}', False)
     
     async def stop(self):
         """Stop the relay gracefully."""

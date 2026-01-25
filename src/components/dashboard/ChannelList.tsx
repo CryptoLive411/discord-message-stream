@@ -1,22 +1,25 @@
 import { DiscordChannel } from '@/types';
 import { cn } from '@/lib/utils';
-import { Hash, Paperclip, MessageSquare, MoreVertical, ExternalLink } from 'lucide-react';
+import { Hash, Paperclip, MessageSquare, MoreVertical, ExternalLink, Power } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Badge } from '@/components/ui/badge';
+import { Switch } from '@/components/ui/switch';
 import { formatDistanceToNow } from 'date-fns';
 
 interface ChannelListProps {
   channels: DiscordChannel[];
   compact?: boolean;
+  onToggleEnabled?: (id: string, enabled: boolean) => void;
 }
 
-export function ChannelList({ channels, compact = false }: ChannelListProps) {
+export function ChannelList({ channels, compact = false, onToggleEnabled }: ChannelListProps) {
   const getStatusColor = (status: DiscordChannel['status']) => {
     switch (status) {
       case 'active':
@@ -60,6 +63,15 @@ export function ChannelList({ channels, compact = false }: ChannelListProps) {
             !channel.enabled && 'opacity-50'
           )}
         >
+          {/* Enable/Disable Toggle */}
+          {onToggleEnabled && (
+            <Switch
+              checked={channel.enabled}
+              onCheckedChange={(checked) => onToggleEnabled(channel.id, checked)}
+              className="data-[state=checked]:bg-success"
+            />
+          )}
+
           <span className={cn('status-dot', getStatusColor(channel.status))} />
 
           <div className="flex items-center gap-2 min-w-0 flex-1">
@@ -101,8 +113,15 @@ export function ChannelList({ channels, compact = false }: ChannelListProps) {
                 <ExternalLink className="w-4 h-4 mr-2" />
                 Open in Discord
               </DropdownMenuItem>
-              <DropdownMenuItem>{channel.enabled ? 'Disable' : 'Enable'}</DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem 
+                onClick={() => onToggleEnabled?.(channel.id, !channel.enabled)}
+              >
+                <Power className="w-4 h-4 mr-2" />
+                {channel.enabled ? 'Disable Tracking' : 'Enable Tracking'}
+              </DropdownMenuItem>
               <DropdownMenuItem>Edit Mapping</DropdownMenuItem>
+              <DropdownMenuSeparator />
               <DropdownMenuItem className="text-destructive">Remove</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>

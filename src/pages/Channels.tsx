@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Layout } from '@/components/layout/Layout';
 import { ChannelList } from '@/components/dashboard/ChannelList';
-import { useChannels, useAddChannel } from '@/hooks/useChannels';
+import { useChannels, useAddChannel, useUpdateChannel } from '@/hooks/useChannels';
 import { useTelegramConfig } from '@/hooks/useTelegramConfig';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -50,6 +50,11 @@ export default function Channels() {
   const { data: channels = [], isLoading: channelsLoading } = useChannels();
   const { data: telegramConfig } = useTelegramConfig();
   const addChannel = useAddChannel();
+  const updateChannel = useUpdateChannel();
+
+  const handleToggleEnabled = (id: string, enabled: boolean) => {
+    updateChannel.mutate({ id, enabled });
+  };
 
   const filteredChannels = channels.filter((channel) => {
     const matchesSearch =
@@ -291,7 +296,7 @@ export default function Channels() {
             )}
           </div>
         ) : (
-          <ChannelList channels={filteredChannels} />
+          <ChannelList channels={filteredChannels} onToggleEnabled={handleToggleEnabled} />
         )}
       </div>
     </Layout>
