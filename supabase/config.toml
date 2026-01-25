@@ -5,3 +5,6 @@ verify_jwt = false
 
 [functions.worker-pull]
 verify_jwt = false
+
+[functions.parse-signal]
+verify_jwt = false
