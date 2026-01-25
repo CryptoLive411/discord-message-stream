@@ -2,8 +2,13 @@
 """
 Discord to Telegram Mirror Relay Worker
 ========================================
-Watches Discord channels via browser automation (Playwright)
-and relays messages to Telegram via MTProto (Telethon).
+Watches Discord channels via browser automation (Playwright) using MutationObserver
+for real-time message detection, and relays messages to Telegram via MTProto (Telethon).
+
+Architecture:
+- Opens one browser tab per Discord channel
+- Injects MutationObserver to detect new messages instantly (<100ms)
+- No polling — event-driven message detection
 
 Run with: python discord_telegram_relay.py
 """
@@ -22,7 +27,7 @@ from typing import Optional
 
 import httpx
 from dotenv import load_dotenv
-from playwright.async_api import async_playwright, Browser, Page
+from playwright.async_api import async_playwright, Browser, Page, BrowserContext
 from telethon import TelegramClient
 from telethon.tl.types import InputPeerChannel, InputPeerChat
 
@@ -52,7 +57,7 @@ class Config:
     telegram_api_id: int
     telegram_api_hash: str
     telegram_session_name: str = "discord_mirror_session"
-    poll_interval: int = 2  # seconds between Discord checks (fast polling)
+    channel_refresh_interval: int = 60  # seconds between checking for new/removed channels
     headless: bool = True   # Run browser in headless mode
     browser_profile_path: str = "./discord_profile"
     
@@ -70,7 +75,7 @@ class Config:
             telegram_api_id=int(os.getenv('TELEGRAM_API_ID')),
             telegram_api_hash=os.getenv('TELEGRAM_API_HASH'),
             telegram_session_name=os.getenv('TELEGRAM_SESSION_NAME', 'discord_mirror_session'),
-            poll_interval=int(os.getenv('POLL_INTERVAL', '2')),
+            channel_refresh_interval=int(os.getenv('CHANNEL_REFRESH_INTERVAL', '60')),
             headless=os.getenv('HEADLESS', 'true').lower() == 'true',
             browser_profile_path=os.getenv('BROWSER_PROFILE_PATH', './discord_profile'),
         )
@@ -181,7 +186,6 @@ class APIClient:
                 headers=self.headers,
                 json={
                     "action": "mark_failed",
-                    # backend expects error_message
                     "data": {"message_id": message_id, "error_message": error}
                 }
             )
@@ -260,43 +264,301 @@ class APIClient:
         await self.client.aclose()
 
 # ============================================================================
-# Discord Watcher (Playwright)
+# Channel Tab Manager (MutationObserver-based real-time detection)
 # ============================================================================
 
+class ChannelTab:
+    """Manages a single browser tab watching one Discord channel."""
+    
+    # JavaScript to inject for real-time message detection
+    OBSERVER_SCRIPT = """
+    (function() {
+        // Avoid double-injection
+        if (window.__discordObserverActive) return;
+        window.__discordObserverActive = true;
+        
+        const seenMessages = new Set();
+        let lastProcessedId = null;
+        
+        // Initialize with existing messages to avoid backfill
+        function initializeSeenMessages() {
+            const messages = document.querySelectorAll('[id^="chat-messages-"]');
+            messages.forEach(msg => {
+                const id = msg.id || msg.getAttribute('data-list-item-id');
+                if (id) seenMessages.add(id);
+            });
+            if (messages.length > 0) {
+                lastProcessedId = messages[messages.length - 1].id;
+            }
+            console.log('[Observer] Initialized with', seenMessages.size, 'existing messages');
+        }
+        
+        // Extract message data from a DOM element
+        function extractMessage(element) {
+            const id = element.id || element.getAttribute('data-list-item-id');
+            if (!id || seenMessages.has(id)) return null;
+            
+            seenMessages.add(id);
+            
+            // Extract author
+            let author = 'Unknown';
+            const authorSelectors = [
+                '[class*="username-"]',
+                'h3 span[class*="username"]',
+                'span[class*="headerText-"] span',
+                '[class*="headerText-"] [class*="username"]',
+            ];
+            for (const sel of authorSelectors) {
+                const el = element.querySelector(sel);
+                if (el && el.innerText && el.innerText.trim()) {
+                    author = el.innerText.trim();
+                    break;
+                }
+            }
+            
+            // Extract content
+            let content = '';
+            const contentSelectors = [
+                '[id^="message-content-"]',
+                '[class*="messageContent-"]',
+                '[class*="markup-"]',
+            ];
+            for (const sel of contentSelectors) {
+                const el = element.querySelector(sel);
+                if (el && el.innerText && el.innerText.trim()) {
+                    content = el.innerText.trim();
+                    break;
+                }
+            }
+            
+            // Extract attachments
+            const attachments = [];
+            element.querySelectorAll('a[class*="imageWrapper-"], a[href*="cdn.discordapp.com"]').forEach(a => {
+                if (a.href) attachments.push(a.href);
+            });
+            element.querySelectorAll('img[src*="cdn.discordapp.com"]').forEach(img => {
+                if (img.src && !attachments.includes(img.src)) attachments.push(img.src);
+            });
+            
+            // Skip empty messages
+            if (!content && attachments.length === 0) return null;
+            
+            return {
+                message_id: id,
+                author: author,
+                content: content,
+                attachments: attachments,
+                timestamp: new Date().toISOString()
+            };
+        }
+        
+        // Process new message nodes
+        function processNewMessages(nodes) {
+            nodes.forEach(node => {
+                if (node.nodeType !== 1) return;
+                
+                // Check if this is a message element
+                const isMessage = node.id?.startsWith('chat-messages-') || 
+                                  node.getAttribute?.('data-list-item-id')?.startsWith('chat-messages-');
+                
+                if (isMessage) {
+                    const msg = extractMessage(node);
+                    if (msg) {
+                        console.log('[Observer] New message detected:', msg.author, msg.content?.substring(0, 50));
+                        window.__onNewMessage(JSON.stringify(msg));
+                    }
+                }
+                
+                // Also check children (for batch insertions)
+                if (node.querySelectorAll) {
+                    const childMessages = node.querySelectorAll('[id^="chat-messages-"]');
+                    childMessages.forEach(child => {
+                        const msg = extractMessage(child);
+                        if (msg) {
+                            console.log('[Observer] New message detected (child):', msg.author);
+                            window.__onNewMessage(JSON.stringify(msg));
+                        }
+                    });
+                }
+            });
+        }
+        
+        // Set up MutationObserver
+        function setupObserver() {
+            // Find the messages container
+            const container = document.querySelector('[class*="messagesWrapper-"]') ||
+                              document.querySelector('[class*="scrollerInner-"]') ||
+                              document.querySelector('main');
+            
+            if (!container) {
+                console.log('[Observer] No container found, retrying...');
+                setTimeout(setupObserver, 1000);
+                return;
+            }
+            
+            const observer = new MutationObserver((mutations) => {
+                for (const mutation of mutations) {
+                    if (mutation.addedNodes.length > 0) {
+                        processNewMessages(mutation.addedNodes);
+                    }
+                }
+            });
+            
+            observer.observe(container, {
+                childList: true,
+                subtree: true
+            });
+            
+            console.log('[Observer] MutationObserver active on', container.className);
+        }
+        
+        // Scroll to bottom to ensure we see latest messages
+        function scrollToBottom() {
+            const scroller = document.querySelector('[class*="messagesWrapper-"]');
+            if (scroller) {
+                scroller.scrollTop = scroller.scrollHeight;
+            }
+        }
+        
+        // Initialize
+        setTimeout(() => {
+            scrollToBottom();
+            setTimeout(() => {
+                initializeSeenMessages();
+                setupObserver();
+            }, 500);
+        }, 1000);
+    })();
+    """
+    
+    def __init__(self, channel: dict, context: BrowserContext, api: APIClient, on_message_callback):
+        self.channel = channel
+        self.context = context
+        self.api = api
+        self.on_message_callback = on_message_callback
+        self.page: Optional[Page] = None
+        self.running = False
+        self.channel_id = channel['id']
+        self.channel_name = channel['name']
+        self.channel_url = channel['url']
+    
+    def _generate_fingerprint(self, message_id: str) -> str:
+        """Generate a unique fingerprint for a message."""
+        content = f"{self.channel_id}:{message_id}"
+        return hashlib.sha256(content.encode()).hexdigest()[:32]
+    
+    async def _handle_new_message(self, message_json: str):
+        """Callback when MutationObserver detects a new message."""
+        try:
+            msg = json.loads(message_json)
+            fingerprint = self._generate_fingerprint(msg['message_id'])
+            
+            logger.info(f"[{self.channel_name}] New message from {msg['author']}: {msg['content'][:50] if msg['content'] else '[attachment]'}...")
+            
+            # Push to queue immediately
+            success = await self.api.push_message(self.channel_id, {
+                'fingerprint': fingerprint,
+                'discord_message_id': msg['message_id'],
+                'author_name': msg['author'],
+                'message_text': msg['content'],
+                'attachment_urls': msg['attachments']
+            })
+            
+            if success:
+                await self.api.log('success', f"Queued message from {msg['author']}", self.channel_name, f"Content: {msg['content'][:50] if msg['content'] else '[attachment]'}...")
+                # Update cursor
+                await self.api.set_channel_cursor(self.channel_id, fingerprint, msg.get('timestamp'))
+            
+            # Notify main relay
+            if self.on_message_callback:
+                await self.on_message_callback(self.channel_id, msg)
+                
+        except Exception as e:
+            logger.error(f"[{self.channel_name}] Error handling message: {e}")
+    
+    async def start(self):
+        """Open tab and start watching the channel."""
+        try:
+            self.page = await self.context.new_page()
+            self.running = True
+            
+            # Expose Python callback to JavaScript
+            await self.page.expose_function('__onNewMessage', self._handle_new_message)
+            
+            # Navigate to channel
+            logger.info(f"[{self.channel_name}] Opening channel tab...")
+            await self.page.goto(self.channel_url, wait_until='domcontentloaded')
+            
+            # Wait for messages to load
+            try:
+                await self.page.wait_for_selector('[class*="messagesWrapper-"]', timeout=10000)
+            except:
+                await asyncio.sleep(2)
+            
+            # Inject the observer script
+            await self.page.evaluate(self.OBSERVER_SCRIPT)
+            
+            await self.api.log('success', f"Channel tab opened with real-time observer", self.channel_name)
+            logger.info(f"[{self.channel_name}] MutationObserver active - watching for new messages")
+            
+            # Keep the tab alive
+            while self.running:
+                await asyncio.sleep(5)
+                # Periodically re-inject observer in case Discord's SPA navigation broke it
+                try:
+                    await self.page.evaluate(self.OBSERVER_SCRIPT)
+                except:
+                    pass
+                    
+        except Exception as e:
+            logger.error(f"[{self.channel_name}] Tab error: {e}")
+            await self.api.log('error', f"Channel tab error: {e}", self.channel_name)
+    
+    async def stop(self):
+        """Close the tab."""
+        self.running = False
+        if self.page:
+            try:
+                await self.page.close()
+            except:
+                pass
+        logger.info(f"[{self.channel_name}] Tab closed")
+
+
 class DiscordWatcher:
-    """Watches Discord channels for new messages using Playwright."""
+    """Watches Discord channels using parallel tabs with MutationObserver."""
     
     def __init__(self, config: Config, api: APIClient):
         self.config = config
         self.api = api
-        self.browser: Optional[Browser] = None
-        self.page: Optional[Page] = None
+        self.context: Optional[BrowserContext] = None
+        self.tabs: dict[str, ChannelTab] = {}  # channel_id -> ChannelTab
         self.running = False
-        self.last_fingerprints: dict[str, str] = {}
+        self.message_queue = asyncio.Queue()
     
     async def start(self):
         """Start the browser and login to Discord."""
-        logger.info("Starting Discord watcher...")
+        logger.info("Starting Discord watcher (MutationObserver mode)...")
         
         playwright = await async_playwright().start()
         
         # Use persistent context for session persistence
-        context = await playwright.chromium.launch_persistent_context(
+        self.context = await playwright.chromium.launch_persistent_context(
             self.config.browser_profile_path,
             headless=self.config.headless,
             viewport={'width': 1280, 'height': 800},
             user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         )
         
-        self.page = context.pages[0] if context.pages else await context.new_page()
         self.running = True
         
-        # Check if we're logged in
-        await self.page.goto('https://discord.com/channels/@me')
+        # Check if we're logged in using an initial page
+        page = self.context.pages[0] if self.context.pages else await self.context.new_page()
+        await page.goto('https://discord.com/channels/@me')
         await asyncio.sleep(3)
         
         # Check for login page
-        if 'login' in self.page.url.lower():
+        if 'login' in page.url.lower():
             logger.warning("Not logged in to Discord. Please login manually...")
             await self.api.update_connection_status('discord', 'disconnected', 'Login required')
             await self.api.log('warn', 'Discord login required - please login in the browser window')
@@ -304,257 +566,76 @@ class DiscordWatcher:
             # Wait for manual login (up to 5 minutes)
             for _ in range(60):
                 await asyncio.sleep(5)
-                if 'login' not in self.page.url.lower():
+                if 'login' not in page.url.lower():
                     logger.info("Discord login successful!")
                     break
             else:
                 raise Exception("Discord login timeout - please run in non-headless mode to login")
         
+        # Close the login check page
+        await page.close()
+        
         await self.api.update_connection_status('discord', 'connected')
-        await self.api.log('info', 'Discord watcher connected and ready')
+        await self.api.log('info', 'Discord watcher connected (real-time MutationObserver mode)')
         logger.info("Discord watcher ready!")
     
-    def _generate_fingerprint(self, channel_id: str, message_id: str) -> str:
-        """Generate a unique fingerprint for a message."""
-        content = f"{channel_id}:{message_id}"
-        return hashlib.sha256(content.encode()).hexdigest()[:32]
+    async def _on_message(self, channel_id: str, message: dict):
+        """Callback when any tab detects a new message."""
+        await self.message_queue.put((channel_id, message))
     
-    async def _scrape_messages(self, channel_url: str, channel_name: str = "unknown") -> list[dict]:
-        """Scrape messages from a Discord channel."""
-        messages = []
+    async def _sync_tabs(self):
+        """Sync tabs with enabled channels from database."""
+        channels = await self.api.get_channels()
+        enabled_channels = {c['id']: c for c in channels if c.get('enabled')}
         
-        try:
-            await self.api.log('info', f"Navigating to channel", channel_name, f"URL: {channel_url}")
-            await self.page.goto(channel_url, wait_until='domcontentloaded')
-            
-            # Wait for messages container to appear (Discord needs time to load)
-            try:
-                await self.page.wait_for_selector('[class*="messagesWrapper-"]', timeout=5000)
-            except:
-                await asyncio.sleep(1.5)  # Fallback wait
-            
-            # Scroll to bottom of chat to ensure messages are hydrated (Discord virtualizes the list)
-            chat_scroller = await self.page.query_selector('[class*="messagesWrapper-"]')
-            if chat_scroller:
-                await chat_scroller.evaluate('el => el.scrollTop = el.scrollHeight')
-                await asyncio.sleep(0.5)  # Give time for virtualized content to render
-            
-            # Try multiple selectors for Discord messages (Discord changes these frequently)
-            selectors = [
-                '[id^="chat-messages-"]',  # Message container IDs
-                '[class*="messageListItem-"]',  # Message list items  
-                '[class*="message-"][class*="cozyMessage-"]',  # Cozy message format
-                '[data-list-item-id^="chat-messages-"]',  # Data attribute selector
-                'li[id^="chat-messages-"]',  # List item messages
-                '[class*="messageListItem"]',  # Without hyphen
-                'ol[class*="scrollerInner-"] > li',  # Chat scroller list items
-            ]
-            
-            message_elements = []
-            tried_selectors = []
-            for selector in selectors:
-                try:
-                    elements = await self.page.query_selector_all(selector)
-                    tried_selectors.append(f"{selector}: {len(elements)}")
-                    if elements:
-                        await self.api.log('success', f"Found {len(elements)} messages", channel_name, f"Selector: {selector}")
-                        logger.info(f"Found {len(elements)} messages with selector: {selector}")
-                        message_elements = elements
-                        break
-                except Exception as e:
-                    tried_selectors.append(f"{selector}: error")
-                    logger.debug(f"Selector {selector} failed: {e}")
-                    continue
-            
-            if not message_elements:
-                await self.api.log('warning', f"No messages found with any selector", channel_name, f"Tried: {', '.join(tried_selectors[:4])}")
-                logger.warning(f"No messages found with any selector in {channel_url}")
-                return messages
-            
-            # Process only last 15 messages to reduce noise
-            for element in message_elements[-15:]:
-                try:
-                    # Scroll this element into view to ensure it's hydrated
-                    await element.scroll_into_view_if_needed()
-                    await asyncio.sleep(0.1)  # Small delay for hydration
-                    
-                    # Extract message ID from data attribute
-                    message_id = await element.get_attribute('id')
-                    if not message_id:
-                        message_id = await element.get_attribute('data-list-item-id')
-                    if not message_id:
-                        continue
-                    
-                    # Extract author using multiple fallback selectors
-                    author = ''
-                    author_selectors = [
-                        '[class*="username-"]',
-                        'h3 span[class*="username"]',
-                        'span[class*="headerText-"] span',
-                        '[class*="headerText-"] [class*="username"]',
-                        'h3[class*="header-"] span',
-                    ]
-                    for sel in author_selectors:
-                        try:
-                            author_el = await element.query_selector(sel)
-                            if author_el:
-                                txt = await author_el.inner_text()
-                                if txt and txt.strip():
-                                    author = txt.strip()
-                                    break
-                        except:
-                            continue
-                    
-                    # Extract message content using multiple fallback selectors
-                    content = ''
-                    content_selectors = [
-                        '[id^="message-content-"]',
-                        'div[id^="message-content-"]',
-                        'span[id^="message-content-"]',
-                        '[class*="messageContent-"]',
-                        'div[class*="markup-"]',
-                    ]
-                    for sel in content_selectors:
-                        try:
-                            content_el = await element.query_selector(sel)
-                            if content_el:
-                                # Use inner_text() which gets rendered/computed text
-                                txt = await content_el.inner_text()
-                                if txt and txt.strip():
-                                    content = txt.strip()
-                                    break
-                        except:
-                            continue
-                    
-                    # Skip messages with no author AND no content (likely system messages or empty)
-                    if not author and not content:
-                        continue
-                    
-                    # Extract attachments
-                    attachments = []
-                    try:
-                        attachment_els = await element.query_selector_all('[class*="imageWrapper-"] img, [class*="attachment-"] a, a[class*="imageWrapper-"]')
-                        for att_el in attachment_els:
-                            src = await att_el.get_attribute('src') or await att_el.get_attribute('href')
-                            if src and not src.startswith('data:'):
-                                attachments.append(src)
-                    except:
-                        pass
-                    
-                    # Extract timestamp
-                    timestamp = None
-                    try:
-                        time_el = await element.query_selector('time')
-                        if time_el:
-                            timestamp = await time_el.get_attribute('datetime')
-                    except:
-                        pass
-                    
-                    messages.append({
-                        'message_id': message_id,
-                        'author': author or 'Unknown',
-                        'content': content,
-                        'attachments': attachments,
-                        'timestamp': timestamp
-                    })
-                    
-                except Exception as e:
-                    logger.debug(f"Error parsing message element: {e}")
-                    continue
-            
-            if messages:
-                authors_sample = ', '.join(set(m['author'] for m in messages[:5] if m['author'] != 'Unknown'))
-                await self.api.log('info', f"Scraped {len(messages)} messages", channel_name, f"Authors: {authors_sample or 'Unknown'}")
-            
-        except Exception as e:
-            await self.api.log('error', f"Error scraping channel: {str(e)}", channel_name)
-            logger.error(f"Error scraping channel {channel_url}: {e}")
+        # Close tabs for disabled/removed channels
+        to_remove = [cid for cid in self.tabs if cid not in enabled_channels]
+        for cid in to_remove:
+            logger.info(f"Closing tab for disabled channel: {self.tabs[cid].channel_name}")
+            await self.tabs[cid].stop()
+            del self.tabs[cid]
         
-        return messages
+        # Open tabs for new channels
+        for cid, channel in enabled_channels.items():
+            if cid not in self.tabs:
+                logger.info(f"Opening tab for new channel: {channel['name']}")
+                tab = ChannelTab(channel, self.context, self.api, self._on_message)
+                self.tabs[cid] = tab
+                # Start tab in background
+                asyncio.create_task(tab.start())
+        
+        return len(self.tabs)
     
     async def watch_channels(self):
-        """Main loop to watch all enabled channels."""
-        cycle_count = 0
+        """Main loop to manage channel tabs."""
+        # Initial sync
+        count = await self._sync_tabs()
+        await self.api.log('info', f'Started watching {count} channels with real-time detection')
+        
+        # Periodic sync to add/remove channels
         while self.running:
-            cycle_count += 1
             try:
-                channels = await self.api.get_channels()
-                enabled_channels = [c for c in channels if c.get('enabled')]
-                
-                await self.api.log('info', f"Watch cycle #{cycle_count} starting", details=f"Checking {len(enabled_channels)} enabled channels")
-                
-                for channel in enabled_channels:
-                    channel_id = channel['id']
-                    channel_url = channel['url']
-                    channel_name = channel['name']
-                    last_fingerprint = channel.get('last_message_fingerprint')
-                    
-                    logger.debug(f"Checking channel: {channel_name}")
-                    
-                    messages = await self._scrape_messages(channel_url, channel_name)
-
-                    # If this channel has never been checkpointed, do NOT backfill old messages.
-                    # Instead, set the cursor to the newest visible message and start from next cycle.
-                    if last_fingerprint is None:
-                        if messages:
-                            newest = messages[-1]
-                            newest_fp = self._generate_fingerprint(channel_id, newest['message_id'])
-                            await self.api.set_channel_cursor(channel_id, newest_fp, newest.get('timestamp'))
-                            await self.api.log('info', 'Initialized channel cursor (skipping backfill)', channel_name)
-                        else:
-                            await self.api.log('warning', 'No messages visible to initialize cursor', channel_name)
-                        continue
-                    
-                    # Find new messages (after last fingerprint)
-                    new_messages = []
-                    found_last = last_fingerprint is None
-                    
-                    for msg in messages:
-                        fingerprint = self._generate_fingerprint(channel_id, msg['message_id'])
-                        
-                        if found_last:
-                            new_messages.append({**msg, 'fingerprint': fingerprint})
-                        elif fingerprint == last_fingerprint:
-                            found_last = True
-                    
-                    if new_messages:
-                        await self.api.log('success', f"Found {len(new_messages)} new messages", channel_name)
-                    
-                    # Push new messages to queue
-                    for msg in new_messages:
-                        success = await self.api.push_message(channel_id, {
-                            'fingerprint': msg['fingerprint'],
-                            'discord_message_id': msg['message_id'],
-                            'author_name': msg['author'],
-                            'message_text': msg['content'],
-                            'attachment_urls': msg['attachments']
-                        })
-                        
-                        if success:
-                            logger.info(f"Queued message from {msg['author']} in #{channel_name}")
-                            await self.api.log('success', f"Queued message from {msg['author']}", channel_name, f"Content: {msg['content'][:50]}...")
-
-                    # Always advance cursor to newest seen message so we don't reprocess history
-                    if messages:
-                        newest = messages[-1]
-                        newest_fp = self._generate_fingerprint(channel_id, newest['message_id'])
-                        await self.api.set_channel_cursor(channel_id, newest_fp, newest.get('timestamp'))
-                
+                await asyncio.sleep(self.config.channel_refresh_interval)
+                count = await self._sync_tabs()
                 await self.api.update_connection_status('discord', 'connected')
-                await self.api.log('info', f"Watch cycle #{cycle_count} complete", details=f"Next check in {self.config.poll_interval}s")
-                
+                logger.debug(f"Channel sync complete: {count} tabs active")
             except Exception as e:
-                logger.error(f"Error in watch loop: {e}")
-                await self.api.log('error', f"Watch loop error: {str(e)}")
-                await self.api.update_connection_status('discord', 'error', str(e))
-            
-            await asyncio.sleep(self.config.poll_interval)
+                logger.error(f"Error in channel sync: {e}")
+                await self.api.log('error', f"Channel sync error: {e}")
     
     async def stop(self):
-        """Stop the watcher and close browser."""
+        """Stop the watcher and close all tabs."""
         self.running = False
-        if self.page:
-            await self.page.context.close()
+        
+        # Stop all tabs
+        for tab in self.tabs.values():
+            await tab.stop()
+        self.tabs.clear()
+        
+        # Close browser context
+        if self.context:
+            await self.context.close()
+        
         logger.info("Discord watcher stopped")
 
 # ============================================================================
@@ -642,7 +723,7 @@ class TelegramSender:
                 messages = await self.api.get_pending_messages()
                 
                 if not messages:
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.3)  # Fast poll when no messages
                     continue
                 
                 # Get destination
@@ -681,8 +762,7 @@ class TelegramSender:
                             dest['entity'],
                             text,
                             reply_to=reply_to,
-                            # Send plain text; avoids markdown surprises
-                            parse_mode=None
+                            parse_mode=None  # Send plain text
                         )
                         
                         # Handle attachments
@@ -713,7 +793,7 @@ class TelegramSender:
                 logger.error(f"Error in send loop: {e}")
                 await self.api.update_connection_status('telegram', 'error', str(e))
             
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.2)  # Fast loop
     
     async def stop(self):
         """Stop the sender and disconnect."""
@@ -738,9 +818,9 @@ class DiscordTelegramRelay:
     
     async def start(self):
         """Start the relay."""
-        logger.info("=" * 50)
-        logger.info("Discord to Telegram Relay Starting")
-        logger.info("=" * 50)
+        logger.info("=" * 60)
+        logger.info("Discord to Telegram Relay Starting (Real-Time Mode)")
+        logger.info("=" * 60)
         
         self.running = True
         
@@ -757,7 +837,7 @@ class DiscordTelegramRelay:
                 self.telegram_sender.start()
             )
             
-            await self.api.log('info', 'Discord to Telegram relay started')
+            await self.api.log('info', 'Discord to Telegram relay started (real-time mode)')
             
             # Run both watch/send loops
             await asyncio.gather(
