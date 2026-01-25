@@ -279,10 +279,13 @@ class ChannelTab:
         
         const seenMessages = new Set();
         let lastProcessedId = null;
+        // Warmup window: Discord hydrates existing messages after navigation.
+        // During this time, we record IDs but do NOT forward anything.
+        let warmupUntil = Date.now() + 4000;
         
         // Initialize with existing messages to avoid backfill
         function initializeSeenMessages() {
-            const messages = document.querySelectorAll('[id^="chat-messages-"]');
+            const messages = document.querySelectorAll('[id^="chat-messages-"], [data-list-item-id^="chat-messages-"]');
             messages.forEach(msg => {
                 const id = msg.id || msg.getAttribute('data-list-item-id');
                 if (id) seenMessages.add(id);
@@ -299,6 +302,12 @@ class ChannelTab:
             if (!id || seenMessages.has(id)) return null;
             
             seenMessages.add(id);
+            
+            // Ignore anything that appears during initial hydration / warmup.
+            if (Date.now() < warmupUntil) {
+                console.log('[Observer] Skipping warmup message:', id);
+                return null;
+            }
             
             // Extract author
             let author = 'Unknown';
@@ -421,13 +430,28 @@ class ChannelTab:
             }
         }
         
+        // Wait for messages to appear before initializing
+        function waitForInitialMessages(attempt = 0) {
+            const messages = document.querySelectorAll('[id^="chat-messages-"], [data-list-item-id^="chat-messages-"]');
+            if (messages.length > 0) {
+                initializeSeenMessages();
+                setupObserver();
+                return;
+            }
+            if (attempt >= 30) {
+                console.log('[Observer] No messages found after wait; starting observer anyway');
+                setupObserver();
+                return;
+            }
+            setTimeout(() => waitForInitialMessages(attempt + 1), 200);
+        }
+        
         // Initialize
         setTimeout(() => {
             scrollToBottom();
             setTimeout(() => {
-                initializeSeenMessages();
-                setupObserver();
-            }, 500);
+                waitForInitialMessages();
+            }, 800);
         }, 1000);
     })();
     """
@@ -704,18 +728,8 @@ class TelegramSender:
             return None
     
     async def _format_message(self, msg: dict, channel_name: str) -> str:
-        """Format a message for Telegram."""
-        author = (msg.get('author_name') or '').strip()
-        text = (msg.get('message_text') or '').strip()
-
-        # Simple format: "Author: message" (no channel prefix)
-        if author and author.lower() != 'unknown':
-            if text:
-                return f"{author}: {text}"
-            return f"{author}:"
-        
-        # Fallback for unknown author
-        return text if text else ""
+        """Format a message for Telegram - text only, no username."""
+        return (msg.get('message_text') or '').strip()
     
     async def send_pending_messages(self):
         """Main loop to send pending messages."""

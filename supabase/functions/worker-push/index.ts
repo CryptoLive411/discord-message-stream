@@ -41,14 +41,14 @@ Deno.serve(async (req) => {
         // Push a new message from Discord to the queue
         const { channel_id, fingerprint, discord_message_id, message_text, author_name, attachment_urls } = data;
 
-        // Check for duplicate
-        const { data: existing } = await supabase
+        // Check for duplicate (use limit instead of single to avoid errors on multiple matches)
+        const { data: existingRows } = await supabase
           .from("message_queue")
           .select("id")
           .eq("fingerprint", fingerprint)
-          .single();
+          .limit(1);
 
-        if (existing) {
+        if (existingRows && existingRows.length > 0) {
           // Even if duplicate, advance cursor so the watcher can stop re-sending history.
           await supabase
             .from("discord_channels")
