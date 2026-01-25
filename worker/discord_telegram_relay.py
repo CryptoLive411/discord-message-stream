@@ -308,6 +308,18 @@ class ChannelTab:
             }
         }
 
+        // Convert Discord snowflake to unix ms timestamp.
+        // https://discord.com/developers/docs/reference#snowflakes
+        function snowflakeToUnixMs(snowflake) {
+            try {
+                const DISCORD_EPOCH = 1420070400000n;
+                const ts = (snowflake >> 22n) + DISCORD_EPOCH;
+                return Number(ts);
+            } catch {
+                return null;
+            }
+        }
+
         function isDiscordAttachmentUrl(url) {
             if (!url) return false;
             return /https?:\\/\\/(cdn\\.discordapp\\.com|media\\.discordapp\\.net)\\/(attachments|ephemeral-attachments)\\//.test(url);
@@ -345,11 +357,10 @@ class ChannelTab:
         function extractMessage(element) {
             const id = element.id || element.getAttribute('data-list-item-id');
             
+            const now = Date.now();
+
             // Skip if already seen
             if (!id || seenMessages.has(id)) return null;
-            seenMessages.add(id);
-            
-            const now = Date.now();
 
             // GUARD 1: Block ALL messages until initialization is complete
             if (!state.isInitialized) {
@@ -357,23 +368,35 @@ class ChannelTab:
                 return null;
             }
 
-            // GUARD 2: Block ALL messages during warmup period (15 seconds)
-            // This is the PRIMARY defense against backfill
-            if (now < state.warmupUntil) {
-                console.log('[Observer] BLOCKED (warmup):', id, '- warmup ends in', Math.round((state.warmupUntil - now)/1000), 'sec');
+            // PRIMARY FILTER: Only allow messages that were CREATED after the bot started.
+            // This prevents backfill even if Discord hydrates older messages into the DOM later,
+            // and it DOES NOT block real new messages that arrive immediately after startup.
+            const snowflake = parseSnowflakeFromMessageId(id);
+            const createdAtMs = snowflake !== null ? snowflakeToUnixMs(snowflake) : null;
+            if (createdAtMs !== null && createdAtMs < (state.botStartTime - 1000)) {
+                // Mark as seen so hydration doesn't cause repeated work.
+                seenMessages.add(id);
+                console.log('[Observer] BLOCKED (pre-start timestamp):', id);
                 return null;
             }
 
             // GUARD 3: Snowflake-based check - reject anything older than initial max
             if (state.hasInitialMaxSnowflake) {
-                const snowflake = parseSnowflakeFromMessageId(id);
                 if (snowflake !== null && snowflake <= state.initialMaxSnowflake) {
+                    seenMessages.add(id);
                     console.log('[Observer] BLOCKED (old snowflake):', id);
                     return null;
                 }
-                // Advance cursor for new messages
-                if (snowflake !== null && snowflake > state.initialMaxSnowflake) {
+            }
+
+            // From here on, we accept this message as eligible and mark as seen.
+            seenMessages.add(id);
+
+            // Advance cursor for new messages
+            if (snowflake !== null) {
+                if (!state.hasInitialMaxSnowflake || snowflake > state.initialMaxSnowflake) {
                     state.initialMaxSnowflake = snowflake;
+                    state.hasInitialMaxSnowflake = true;
                 }
             }
             
