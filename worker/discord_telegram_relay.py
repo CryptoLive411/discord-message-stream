@@ -746,9 +746,13 @@ class ChannelTab:
         self.channel_url = channel['url']
     
     def _generate_fingerprint(self, message_id: str) -> str:
-        """Generate a unique fingerprint for a message."""
-        content = f"{self.channel_id}:{message_id}"
-        return hashlib.sha256(content.encode()).hexdigest()[:32]
+        """Generate a unique fingerprint for a message using only the Discord snowflake."""
+        # Extract just the snowflake (16-20 digit ID) from DOM element IDs like
+        # "chat-messages-123456-789012345678901234" to prevent duplicates from re-renders
+        snowflake_match = re.search(r'(\d{16,20})', message_id)
+        snowflake = snowflake_match.group(1) if snowflake_match else message_id
+        content = f"{self.channel_id}:{snowflake}"
+        return hashlib.md5(content.encode()).hexdigest()
     
     async def _handle_new_message(self, message_json: str):
         """Callback when MutationObserver detects a new message."""
