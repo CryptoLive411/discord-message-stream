@@ -163,23 +163,25 @@ Deno.serve(async (req) => {
             );
         }
 
-        // Build channel tag with nice formatting
+        // Build channel tag with nice formatting - unique tag for EVERY channel
         const channelTagMap: Record<string, string> = {
+          // High-value alpha channels (bypass parser)
           "memecoin-alpha": "🪙 MEMECOIN ALPHA",
           "leverage-alpha": "📊 LEVERAGE ALPHA", 
           "gem-alpha": "💎 GEM ALPHA",
           "market-updates": "📈 MARKET UPDATES",
           "airdrop-hunting": "🎁 AIRDROP HUNTING",
+          // Parsed channels with unique tags
           "under-100k-chat": "⚠️ HIGH RISK (<100K)",
-          "gem-hunter-wins": "🏆 ALPHA WINS",
-          "general-chat": "💬 COMMUNITY",
-          "altcoin-chat": "💬 COMMUNITY",
-          "trading-chat": "💬 COMMUNITY",
-          "memecoin-chat": "💬 COMMUNITY",
-          "airdrop-chat": "🎁 AIRDROPS",
+          "memecoin-chat": "🪙 MEMECOIN CHAT",
+          "gem-hunter-wins": "🏆 GEM HUNTER WINS",
+          "general-chat": "💬 GENERAL CHAT",
+          "altcoin-chat": "🔷 ALTCOIN CHAT",
+          "trading-chat": "📉 TRADING CHAT",
+          "airdrop-chat": "🎁 AIRDROP CHAT",
         };
         
-        const channelTag = channelTagMap[channelName] || topicName || `#${channelName}`;
+        const channelTag = channelTagMap[channelName] || `📢 ${channelName.toUpperCase().replace(/-/g, ' ')}`;
         
         // Use formatted message if available, otherwise use original
         const baseMessage = parsed.formatted || message_text;
