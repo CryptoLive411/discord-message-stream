@@ -70,13 +70,15 @@ Deno.serve(async (req) => {
         // Push a new message from Discord to the queue
         const { channel_id, fingerprint, discord_message_id, message_text, author_name, attachment_urls } = data;
 
-        // Get channel info early for logging
+        // Get channel info early for logging and bypass check
         const { data: channel } = await supabase
           .from("discord_channels")
-          .select("name")
+          .select("name, bypass_parser, telegram_topic_name")
           .eq("id", channel_id)
           .single();
         const channelName = channel?.name || "unknown";
+        const bypassParser = channel?.bypass_parser || false;
+        const topicName = channel?.telegram_topic_name || null;
 
         // Check for duplicate (use limit instead of single to avoid errors on multiple matches)
         const { data: existingRows } = await supabase
@@ -124,16 +126,16 @@ Deno.serve(async (req) => {
           formatted: message_text 
         };
         
-        // If tracked author, bypass AI parser entirely - always relay their messages
-        if (isTrackedAuthor) {
+        // If tracked author OR channel has bypass_parser enabled, skip AI parsing
+        if (isTrackedAuthor || bypassParser) {
           parsed = { type: "alpha_call", formatted: message_text };
         } else if (parserEnabled) {
           // Parse the signal with AI to filter noise and format nicely
           parsed = await parseSignal(message_text, author_name, workerKey || "");
         }
           
-        // Skip noise messages (but never skip tracked authors)
-        if (parsed.type === "skip" && !isTrackedAuthor) {
+        // Skip noise messages (but never skip tracked authors or bypass channels)
+        if (parsed.type === "skip" && !isTrackedAuthor && !bypassParser) {
             // Still update cursor so we don't re-process this message
             await supabase
               .from("discord_channels")
@@ -161,8 +163,28 @@ Deno.serve(async (req) => {
             );
         }
 
+        // Build channel tag with nice formatting
+        const channelTagMap: Record<string, string> = {
+          "memecoin-alpha": "🪙 MEMECOIN ALPHA",
+          "leverage-alpha": "📊 LEVERAGE ALPHA", 
+          "gem-alpha": "💎 GEM ALPHA",
+          "market-updates": "📈 MARKET UPDATES",
+          "airdrop-hunting": "🎁 AIRDROP HUNTING",
+          "under-100k-chat": "⚠️ HIGH RISK (<100K)",
+          "gem-hunter-wins": "🏆 ALPHA WINS",
+          "general-chat": "💬 COMMUNITY",
+          "altcoin-chat": "💬 COMMUNITY",
+          "trading-chat": "💬 COMMUNITY",
+          "memecoin-chat": "💬 COMMUNITY",
+          "airdrop-chat": "🎁 AIRDROPS",
+        };
+        
+        const channelTag = channelTagMap[channelName] || topicName || `#${channelName}`;
+        
         // Use formatted message if available, otherwise use original
-        const finalMessageText = parsed.formatted || message_text;
+        const baseMessage = parsed.formatted || message_text;
+        // Prepend channel tag to message
+        const finalMessageText = `${channelTag}\n\n${baseMessage}`;
 
         // Insert new message with parsed/formatted text
         const { error: insertError } = await supabase
@@ -196,16 +218,16 @@ Deno.serve(async (req) => {
         if (incErr) throw incErr;
 
         // Enhanced log with full details
-        const signalTypeLabel = isTrackedAuthor ? "TRACKED" : (parserEnabled ? parsed.type.toUpperCase() : "RAW");
+        const signalTypeLabel = isTrackedAuthor ? "TRACKED" : (bypassParser ? "BYPASS" : (parserEnabled ? parsed.type.toUpperCase() : "RAW"));
         await supabase.from("relay_logs").insert({
           level: "success",
           message: `${signalTypeLabel} signal queued from #${channelName}`,
           channel_name: channelName,
-          signal_type: isTrackedAuthor ? "tracked" : (parserEnabled ? parsed.type : "raw"),
+          signal_type: isTrackedAuthor ? "tracked" : (bypassParser ? "bypass" : (parserEnabled ? parsed.type : "raw")),
           author_name: author_name,
           original_text: message_text.substring(0, 500),
-          formatted_text: parsed.formatted?.substring(0, 500),
-          details: isTrackedAuthor ? `Tracked author - bypassed filter` : (parserEnabled ? `Parsed as ${parsed.type}` : "Parser disabled - raw message"),
+          formatted_text: finalMessageText.substring(0, 500),
+          details: isTrackedAuthor ? `Tracked author - bypassed filter` : (bypassParser ? `Channel bypass - raw message with tag` : (parserEnabled ? `Parsed as ${parsed.type}` : "Parser disabled - raw message")),
           metadata: { 
             signalType: isTrackedAuthor ? "tracked" : (parserEnabled ? parsed.type : "raw"), 
             authorName: author_name,

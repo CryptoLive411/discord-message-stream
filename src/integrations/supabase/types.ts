@@ -64,6 +64,7 @@ export type Database = {
       }
       discord_channels: {
         Row: {
+          bypass_parser: boolean
           created_at: string
           enabled: boolean
           id: string
@@ -82,6 +83,7 @@ export type Database = {
           url: string
         }
         Insert: {
+          bypass_parser?: boolean
           created_at?: string
           enabled?: boolean
           id?: string
@@ -100,6 +102,7 @@ export type Database = {
           url: string
         }
         Update: {
+          bypass_parser?: boolean
           created_at?: string
           enabled?: boolean
           id?: string
