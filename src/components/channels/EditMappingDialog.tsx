@@ -41,9 +41,21 @@ export function EditMappingDialog({
     onOpenChange(newOpen);
   };
 
+  // Extract numeric topic ID from URL if user pastes full Telegram link
+  const extractTopicId = (input: string): string => {
+    const trimmed = input.trim();
+    // Match patterns like https://t.me/c/3517215260/252 or just 252
+    const urlMatch = trimmed.match(/\/(\d+)$/);
+    if (urlMatch) return urlMatch[1];
+    // If it's already just a number, return as-is
+    if (/^\d+$/.test(trimmed)) return trimmed;
+    return trimmed;
+  };
+
   const handleSave = async () => {
     if (!channel) return;
-    await onSave(channel.id, topicId.trim(), topicName.trim());
+    const cleanTopicId = extractTopicId(topicId);
+    await onSave(channel.id, cleanTopicId, topicName.trim());
     onOpenChange(false);
   };
 
