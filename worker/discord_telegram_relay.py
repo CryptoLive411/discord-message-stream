@@ -418,6 +418,8 @@ class ChannelTab:
         function maybeLockBaseline() {
             if (state.baselineLocked) return;
             const quietFor = Date.now() - state.lastDomChangeAt;
+            const primingFor = Date.now() - state.startupAtMs;
+            
             // Normal lock: DOM has been quiet long enough and we have a parsed snowflake.
             if (quietFor >= state.quietPeriodMs && state.baselineSnowflake > 0n) {
                 state.baselineLocked = true;
@@ -425,13 +427,19 @@ class ChannelTab:
                 return;
             }
 
-            // Failsafe: Discord can keep mutating the DOM forever (typing indicators,
-            // lazy hydration, etc.), preventing a "quiet period". To avoid getting
-            // stuck and forwarding nothing, force-lock after maxPrimingMs.
-            const primingFor = Date.now() - state.startupAtMs;
+            // Failsafe 1: Force-lock after maxPrimingMs regardless of DOM activity.
+            // This handles channels with constant typing indicators or lazy hydration.
             if (primingFor >= state.maxPrimingMs) {
                 state.baselineLocked = true;
-                console.log('[Observer] Baseline force-locked after', primingFor + 'ms', state.baselineSnowflake > 0n ? `(baseline=${state.baselineSnowflake.toString()})` : '(baseline=0)');
+                console.log('[Observer] Baseline force-locked after', primingFor + 'ms', state.baselineSnowflake > 0n ? `(baseline=${state.baselineSnowflake.toString()})` : '(baseline=0, will forward all new)');
+                return;
+            }
+            
+            // Failsafe 2: If DOM is quiet but no messages found (empty channel or DOM selector issue),
+            // still lock after a shorter timeout (8 seconds) so we can start forwarding new messages.
+            if (quietFor >= state.quietPeriodMs && primingFor >= 8000) {
+                state.baselineLocked = true;
+                console.log('[Observer] Baseline locked (empty channel mode) after', primingFor + 'ms - will forward all new messages');
             }
         }
         
