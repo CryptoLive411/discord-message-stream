@@ -235,7 +235,56 @@ class APIClient:
             return False
     
     
-    async def ack_command(self, command_id: str, result: str, success: bool) -> bool:
+    async def get_pending_sells(self) -> list[dict]:
+        """Fetch pending sell requests for Jupiter execution."""
+        try:
+            response = await self.client.get(
+                f"{self.base_url}/worker-pull",
+                params={"action": "get_pending_sells"},
+                headers=self.headers
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data.get('sells', [])
+        except Exception as e:
+            logger.error(f"Failed to fetch pending sells: {e}")
+            return []
+    
+    async def update_sell_executed(self, sell_id: str, tx_hash: str, realized_sol: float) -> bool:
+        """Mark a sell request as executed with TX hash."""
+        try:
+            response = await self.client.post(
+                f"{self.base_url}/worker-pull",
+                params={"action": "update_sell_executed"},
+                headers=self.headers,
+                json={
+                    "sell_id": sell_id,
+                    "tx_hash": tx_hash,
+                    "realized_sol": realized_sol
+                }
+            )
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update sell as executed: {e}")
+            return False
+    
+    async def update_sell_failed(self, sell_id: str, error_message: str) -> bool:
+        """Mark a sell request as failed."""
+        try:
+            response = await self.client.post(
+                f"{self.base_url}/worker-pull",
+                params={"action": "update_sell_failed"},
+                headers=self.headers,
+                json={"sell_id": sell_id, "error_message": error_message}
+            )
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update sell as failed: {e}")
+            return False
+    
+
         """Acknowledge a command has been processed."""
         try:
             response = await self.client.post(

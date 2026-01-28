@@ -390,9 +390,111 @@ Deno.serve(async (req) => {
         );
       }
 
+      case "get_pending_sells": {
+        // Get pending sell requests for worker
+        const { data: sells, error } = await supabase
+          .from("sell_requests")
+          .select(`
+            *,
+            trades (
+              contract_address,
+              channel_name,
+              allocation_sol
+            )
+          `)
+          .eq("status", "pending")
+          .order("created_at")
+          .limit(10);
+
+        if (error) throw error;
+
+        return new Response(
+          JSON.stringify({ sells: sells || [] }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      case "update_sell_executed": {
+        // Mark sell request as executed with TX
+        const body = await req.json();
+        const { sell_id, tx_hash, realized_sol } = body;
+
+        const { error } = await supabase
+          .from("sell_requests")
+          .update({
+            status: "executed",
+            tx_hash,
+            realized_sol,
+            executed_at: new Date().toISOString(),
+          })
+          .eq("id", sell_id);
+
+        if (error) throw error;
+
+        // Update parent trade realized PnL if 100% sell
+        const { data: sellReq } = await supabase
+          .from("sell_requests")
+          .select("trade_id, percentage")
+          .eq("id", sell_id)
+          .single();
+
+        if (sellReq?.percentage === 100) {
+          const { data: trade } = await supabase
+            .from("trades")
+            .select("allocation_sol, realized_pnl_sol")
+            .eq("id", sellReq.trade_id)
+            .single();
+
+          const pnl = realized_sol - (trade?.allocation_sol || 0);
+          await supabase
+            .from("trades")
+            .update({
+              status: "sold",
+              realized_pnl_sol: pnl,
+              sell_tx_hash: tx_hash,
+            })
+            .eq("id", sellReq.trade_id);
+        }
+
+        // Log success
+        await supabase.from("relay_logs").insert({
+          level: "success",
+          message: `💰 SELL EXECUTED via Jupiter`,
+          signal_type: "trade_executed",
+          details: `TX: ${tx_hash}, Received: ${realized_sol} SOL`,
+          metadata: { sell_id, tx_hash, realized_sol },
+        });
+
+        return new Response(
+          JSON.stringify({ success: true }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      case "update_sell_failed": {
+        // Mark sell request as failed
+        const body = await req.json();
+        const { sell_id, error_message } = body;
+
+        const { error } = await supabase
+          .from("sell_requests")
+          .update({
+            status: "failed",
+            error_message,
+          })
+          .eq("id", sell_id);
+
+        if (error) throw error;
+
+        return new Response(
+          JSON.stringify({ success: true }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
       default:
         return new Response(
-          JSON.stringify({ error: "Unknown action. Use: get_channels, get_pending_messages, get_telegram_config, get_stats, get_connection_status, get_banned_authors, get_trading_config, get_pending_trades, get_pending_sigma_trades, update_trade_bought, update_trade_failed" }),
+          JSON.stringify({ error: "Unknown action. Use: get_channels, get_pending_messages, get_telegram_config, get_stats, get_connection_status, get_banned_authors, get_trading_config, get_pending_trades, get_pending_sigma_trades, update_trade_bought, update_trade_failed, get_pending_sells, update_sell_executed, update_sell_failed" }),
           { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
     }

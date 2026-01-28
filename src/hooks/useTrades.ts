@@ -200,22 +200,63 @@ export function useWalletInfo() {
   });
 }
 
-// Execute manual sell
+// Queue manual sell request for worker execution
 export function useExecuteSell() {
-  return useMutation<{ success: boolean }, Error, { 
-    tradeId: string; 
-    contractAddress: string; 
-    percentage: number;
-  }>({
-    mutationFn: async () => {
-      // Trading execution is handled by the self-hosted Python worker (Jupiter direct).
-      // We intentionally do NOT execute sells from the hosted backend function because
-      // it cannot reliably resolve Jupiter endpoints (DNS failures).
-      throw new Error('Manual sells are disabled in the dashboard. Use the worker-based execution flow.');
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({ 
+      tradeId, 
+      percentage = 100,
+      slippageBps = 100,
+    }: { 
+      tradeId: string; 
+      contractAddress: string; 
+      percentage: number;
+      slippageBps?: number;
+    }) => {
+      // Queue a sell request; the Python worker will execute it via Jupiter.
+      const { data, error } = await supabase
+        .from('sell_requests')
+        .insert({
+          trade_id: tradeId,
+          percentage,
+          slippage_bps: slippageBps,
+          status: 'pending',
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+      return data;
+    },
+    onSuccess: (_, { percentage }) => {
+      queryClient.invalidateQueries({ queryKey: ['trades'] });
+      queryClient.invalidateQueries({ queryKey: ['openPositions'] });
+      queryClient.invalidateQueries({ queryKey: ['sellRequests'] });
+      toast.success(`Sell ${percentage}% queued — worker will execute shortly`);
     },
     onError: (error) => {
       toast.error(`Sell failed: ${error.message}`);
     },
+  });
+}
+
+// Fetch pending sell requests
+export function useSellRequests() {
+  return useQuery({
+    queryKey: ['sellRequests'],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('sell_requests')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(20);
+
+      if (error) throw error;
+      return data || [];
+    },
+    refetchInterval: 5000,
   });
 }
 

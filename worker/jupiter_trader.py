@@ -327,16 +327,17 @@ class SolanaTrader:
     
     async def process_pending_trades(self):
         """
-        Main loop to process pending trades from database.
+        Main loop to process pending trades and sells from database.
         
         Polls for trades with status 'pending_sigma' and executes buys.
+        Also processes pending sell requests.
         """
         logger.info("🚀 Starting Solana trade processor...")
         await self.api.log('info', '🚀 Solana trader started', details=f'Wallet: {self.public_key}')
         
         while self.running:
             try:
-                # Get pending trades
+                # Process pending BUY trades
                 trades = await self.api.get_pending_sigma_trades()
                 
                 for trade in trades:
@@ -344,7 +345,7 @@ class SolanaTrader:
                     contract_address = trade.get('contract_address')
                     amount_sol = trade.get('allocation_sol', 0.1)
                     
-                    logger.info(f"📝 Processing trade {trade_id}: {contract_address[:8]}... for {amount_sol} SOL")
+                    logger.info(f"📝 Processing BUY {trade_id}: {contract_address[:8]}... for {amount_sol} SOL")
                     
                     try:
                         result = await self.buy_token(contract_address, amount_sol)
@@ -371,6 +372,52 @@ class SolanaTrader:
                     except Exception as e:
                         logger.error(f"Trade execution error: {e}")
                         await self.api.update_trade_failed(trade_id, str(e))
+                
+                # Process pending SELL requests
+                sells = await self.api.get_pending_sells()
+                
+                for sell in sells:
+                    sell_id = sell.get('id')
+                    trade_info = sell.get('trades', {})
+                    contract_address = trade_info.get('contract_address')
+                    percentage = sell.get('percentage', 100)
+                    slippage = sell.get('slippage_bps', 100)
+                    
+                    if not contract_address:
+                        logger.warning(f"Sell {sell_id} missing contract address")
+                        await self.api.update_sell_failed(sell_id, "Missing contract address")
+                        continue
+                    
+                    logger.info(f"💰 Processing SELL {sell_id}: {percentage}% of {contract_address[:8]}...")
+                    
+                    try:
+                        result = await self.sell_token(contract_address, percentage, slippage)
+                        
+                        if result.success:
+                            # Calculate realized SOL from expected output
+                            realized_sol = (result.expected_output or 0) / 1_000_000_000
+                            
+                            await self.api.update_sell_executed(
+                                sell_id,
+                                tx_hash=result.signature,
+                                realized_sol=realized_sol
+                            )
+                            await self.api.log(
+                                'success',
+                                f'💰 SELL EXECUTED: {percentage}% → {realized_sol:.4f} SOL',
+                                details=f'TX: {result.signature}'
+                            )
+                        else:
+                            await self.api.update_sell_failed(sell_id, result.error)
+                            await self.api.log(
+                                'error',
+                                f'❌ SELL FAILED: {result.error}',
+                                details=f'Sell ID: {sell_id}'
+                            )
+                            
+                    except Exception as e:
+                        logger.error(f"Sell execution error: {e}")
+                        await self.api.update_sell_failed(sell_id, str(e))
                 
                 # Wait before next poll
                 await asyncio.sleep(5)
