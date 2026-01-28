@@ -353,7 +353,24 @@ class APIClient:
             return False
     
     async def ack_command(self, command_id: str, result: str, success: bool) -> bool:
-    
+        """Acknowledge a command has been processed."""
+        try:
+            response = await self.client.post(
+                f"{self.base_url}/worker-pull",
+                params={"action": "ack_command"},
+                headers=self.headers,
+                json={
+                    "commandId": command_id,
+                    "result": result,
+                    "success": success
+                }
+            )
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to acknowledge command: {e}")
+            return False
+
     async def send_heartbeat(self) -> bool:
         """Send a heartbeat to indicate worker is alive."""
         try:
