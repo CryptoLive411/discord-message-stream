@@ -130,6 +130,20 @@ Deno.serve(async (req) => {
     const body = await req.json();
     const { action, data } = body;
 
+    // NOTE: Direct Jupiter execution from this hosted function is disabled.
+    // The runtime environment can fail DNS resolution for quote-api.jup.ag.
+    // Trading execution is handled by the self-hosted Python worker instead.
+    const disabledActions = new Set(["buy", "sell", "process_pending", "get_positions"]);
+    if (disabledActions.has(action)) {
+      return new Response(
+        JSON.stringify({
+          error:
+            "Trading actions are disabled here. Queue trades for the Python worker (Jupiter direct) instead.",
+        }),
+        { status: 501, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
     switch (action) {
       case "get_wallet": {
         // Return wallet public key and SOL balance

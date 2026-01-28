@@ -202,46 +202,16 @@ export function useWalletInfo() {
 
 // Execute manual sell
 export function useExecuteSell() {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: async ({ tradeId, contractAddress, percentage }: { 
-      tradeId: string; 
-      contractAddress: string; 
-      percentage: number;
-    }) => {
-      const workerKey = import.meta.env.VITE_WORKER_API_KEY || '123456789101112131415161718192021';
-      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-      
-      const response = await fetch(`${supabaseUrl}/functions/v1/solana-trader`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-worker-key': workerKey,
-        },
-        body: JSON.stringify({
-          action: 'sell',
-          data: {
-            trade_id: tradeId,
-            contract_address: contractAddress,
-            percentage,
-          },
-        }),
-      });
-
-      const result = await response.json();
-      
-      if (!response.ok || result.error) {
-        throw new Error(result.error || 'Sell failed');
-      }
-
-      return result;
-    },
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ['trades'] });
-      queryClient.invalidateQueries({ queryKey: ['openPositions'] });
-      queryClient.invalidateQueries({ queryKey: ['walletInfo'] });
-      toast.success(`Sold for ${data.received_sol?.toFixed(4)} SOL`);
+  return useMutation<{ success: boolean }, Error, { 
+    tradeId: string; 
+    contractAddress: string; 
+    percentage: number;
+  }>({
+    mutationFn: async () => {
+      // Trading execution is handled by the self-hosted Python worker (Jupiter direct).
+      // We intentionally do NOT execute sells from the hosted backend function because
+      // it cannot reliably resolve Jupiter endpoints (DNS failures).
+      throw new Error('Manual sells are disabled in the dashboard. Use the worker-based execution flow.');
     },
     onError: (error) => {
       toast.error(`Sell failed: ${error.message}`);
@@ -258,37 +228,36 @@ export function useExecuteBuy() {
       contractAddress: string; 
       amountSol: number;
     }) => {
-      const workerKey = import.meta.env.VITE_WORKER_API_KEY || '123456789101112131415161718192021';
-      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-      
-      const response = await fetch(`${supabaseUrl}/functions/v1/solana-trader`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-worker-key': workerKey,
-        },
-        body: JSON.stringify({
-          action: 'buy',
-          data: {
-            contract_address: contractAddress,
-            amount_sol: amountSol,
-          },
-        }),
-      });
+      // Queue a trade record; the Python worker will execute it via Jupiter.
+      const now = new Date();
+      const { data, error } = await supabase
+        .from('trades')
+        .insert({
+          contract_address: contractAddress,
+          chain: 'solana',
+          channel_name: 'manual',
+          allocation_sol: amountSol,
+          status: 'pending_sigma',
+          // Defaults aligned with current strategy (-30% SL, +100%/+200% TP)
+          stop_loss_pct: -30,
+          take_profit_1_pct: 100,
+          take_profit_2_pct: 200,
+          // Optional metadata
+          author_name: 'manual',
+          message_fingerprint: `manual:${now.toISOString()}`,
+          retry_count: 0,
+        })
+        .select()
+        .single();
 
-      const result = await response.json();
-      
-      if (!response.ok || result.error) {
-        throw new Error(result.error || 'Buy failed');
-      }
-
-      return result;
+      if (error) throw error;
+      return data;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['trades'] });
       queryClient.invalidateQueries({ queryKey: ['openPositions'] });
       queryClient.invalidateQueries({ queryKey: ['walletInfo'] });
-      toast.success('Buy executed successfully');
+      toast.success('Buy queued — worker will execute shortly');
     },
     onError: (error) => {
       toast.error(`Buy failed: ${error.message}`);
