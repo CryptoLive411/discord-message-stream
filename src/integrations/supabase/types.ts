@@ -310,6 +310,134 @@ export type Database = {
         }
         Relationships: []
       }
+      trades: {
+        Row: {
+          allocation_sol: number
+          author_name: string | null
+          buy_tx_hash: string | null
+          chain: string
+          channel_id: string | null
+          channel_name: string
+          contract_address: string
+          created_at: string
+          current_price: number | null
+          entry_price: number | null
+          error_message: string | null
+          id: string
+          message_fingerprint: string | null
+          realized_pnl_sol: number | null
+          retry_count: number
+          sell_tx_hash: string | null
+          sigma_buy_sent_at: string | null
+          sigma_sell_sent_at: string | null
+          status: string
+          stop_loss_pct: number
+          take_profit_1_pct: number
+          take_profit_2_pct: number
+          token_symbol: string | null
+          updated_at: string
+        }
+        Insert: {
+          allocation_sol: number
+          author_name?: string | null
+          buy_tx_hash?: string | null
+          chain?: string
+          channel_id?: string | null
+          channel_name: string
+          contract_address: string
+          created_at?: string
+          current_price?: number | null
+          entry_price?: number | null
+          error_message?: string | null
+          id?: string
+          message_fingerprint?: string | null
+          realized_pnl_sol?: number | null
+          retry_count?: number
+          sell_tx_hash?: string | null
+          sigma_buy_sent_at?: string | null
+          sigma_sell_sent_at?: string | null
+          status?: string
+          stop_loss_pct?: number
+          take_profit_1_pct?: number
+          take_profit_2_pct?: number
+          token_symbol?: string | null
+          updated_at?: string
+        }
+        Update: {
+          allocation_sol?: number
+          author_name?: string | null
+          buy_tx_hash?: string | null
+          chain?: string
+          channel_id?: string | null
+          channel_name?: string
+          contract_address?: string
+          created_at?: string
+          current_price?: number | null
+          entry_price?: number | null
+          error_message?: string | null
+          id?: string
+          message_fingerprint?: string | null
+          realized_pnl_sol?: number | null
+          retry_count?: number
+          sell_tx_hash?: string | null
+          sigma_buy_sent_at?: string | null
+          sigma_sell_sent_at?: string | null
+          status?: string
+          stop_loss_pct?: number
+          take_profit_1_pct?: number
+          take_profit_2_pct?: number
+          token_symbol?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "trades_channel_id_fkey"
+            columns: ["channel_id"]
+            isOneToOne: false
+            referencedRelation: "discord_channels"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      trading_config: {
+        Row: {
+          allocation_sol: number
+          channel_pattern: string
+          created_at: string
+          enabled: boolean
+          id: string
+          notes: string | null
+          stop_loss_pct: number
+          take_profit_1_pct: number
+          take_profit_2_pct: number
+          updated_at: string
+        }
+        Insert: {
+          allocation_sol?: number
+          channel_pattern: string
+          created_at?: string
+          enabled?: boolean
+          id?: string
+          notes?: string | null
+          stop_loss_pct?: number
+          take_profit_1_pct?: number
+          take_profit_2_pct?: number
+          updated_at?: string
+        }
+        Update: {
+          allocation_sol?: number
+          channel_pattern?: string
+          created_at?: string
+          enabled?: boolean
+          id?: string
+          notes?: string | null
+          stop_loss_pct?: number
+          take_profit_1_pct?: number
+          take_profit_2_pct?: number
+          updated_at?: string
+        }
+        Relationships: []
+      }
       worker_commands: {
         Row: {
           command: string
