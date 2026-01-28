@@ -203,9 +203,104 @@ Deno.serve(async (req) => {
         );
       }
 
+      case "get_trading_config": {
+        // Get trading configuration including sigma bot ID for worker
+        const { data: configs, error: configError } = await supabase
+          .from("trading_config")
+          .select("*")
+          .eq("enabled", true)
+          .order("channel_pattern");
+
+        if (configError) throw configError;
+
+        // Get sigma bot ID from relay_settings
+        const { data: sigmaSetting } = await supabase
+          .from("relay_settings")
+          .select("setting_value")
+          .eq("setting_key", "sigma_bot_id")
+          .maybeSingle();
+
+        return new Response(
+          JSON.stringify({ 
+            configs: configs || [],
+            sigma_bot_id: sigmaSetting?.setting_value || null,
+          }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      case "get_pending_trades": {
+        // Get trades pending Sigma Bot DM execution
+        const { data: trades, error } = await supabase
+          .from("trades")
+          .select("*")
+          .eq("status", "pending_sigma")
+          .order("created_at")
+          .limit(10);
+
+        if (error) throw error;
+
+        return new Response(
+          JSON.stringify({ trades: trades || [] }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      case "mark_trade_sent": {
+        // Mark a trade as sent to Sigma Bot
+        const body = await req.json();
+        const { trade_id } = body;
+
+        const { error } = await supabase
+          .from("trades")
+          .update({
+            status: "bought",
+            sigma_buy_sent_at: new Date().toISOString(),
+          })
+          .eq("id", trade_id);
+
+        if (error) throw error;
+
+        return new Response(
+          JSON.stringify({ success: true }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      case "mark_trade_failed": {
+        // Mark a trade as failed
+        const body = await req.json();
+        const { trade_id, error_message } = body;
+
+        const { data: trade } = await supabase
+          .from("trades")
+          .select("retry_count")
+          .eq("id", trade_id)
+          .single();
+
+        const newRetryCount = (trade?.retry_count || 0) + 1;
+        const newStatus = newRetryCount >= 3 ? "failed" : "pending_sigma";
+
+        const { error } = await supabase
+          .from("trades")
+          .update({
+            status: newStatus,
+            error_message,
+            retry_count: newRetryCount,
+          })
+          .eq("id", trade_id);
+
+        if (error) throw error;
+
+        return new Response(
+          JSON.stringify({ success: true }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
       default:
         return new Response(
-          JSON.stringify({ error: "Unknown action. Use: get_channels, get_pending_messages, get_telegram_config, get_stats, get_connection_status, get_tracked_authors" }),
+          JSON.stringify({ error: "Unknown action. Use: get_channels, get_pending_messages, get_telegram_config, get_stats, get_connection_status, get_banned_authors, get_trading_config, get_pending_trades" }),
           { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
     }

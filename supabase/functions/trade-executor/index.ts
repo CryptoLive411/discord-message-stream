@@ -57,61 +57,8 @@ function extractTokenSymbol(messageText: string): string | null {
   return null;
 }
 
-// Send buy command to Sigma Bot via Telegram API
-async function sendSigmaBuyCommand(
-  contractAddress: string, 
-  allocationSol: number,
-  tokenSymbol: string | null
-): Promise<{ success: boolean; error?: string }> {
-  const TELEGRAM_API_ID = Deno.env.get("TELEGRAM_API_ID");
-  const TELEGRAM_API_HASH = Deno.env.get("TELEGRAM_API_HASH");
-  const TELEGRAM_BOT_TOKEN = Deno.env.get("TELEGRAM_BOT_TOKEN");
-  const SIGMA_BOT_CHAT_ID = Deno.env.get("SIGMA_BOT_CHAT_ID");
-  
-  if (!SIGMA_BOT_CHAT_ID) {
-    return { success: false, error: "SIGMA_BOT_CHAT_ID not configured" };
-  }
-  
-  // Use bot token to send message to Sigma Bot
-  // The message format depends on Sigma Bot's command structure
-  // Common format: /buy <CA> <amount>
-  const buyCommand = `/buy ${contractAddress} ${allocationSol}`;
-  
-  // For now, we'll use the Bot Token approach since we have it
-  // This sends a message FROM our bot TO the Sigma Bot chat
-  if (TELEGRAM_BOT_TOKEN) {
-    try {
-      const response = await fetch(
-        `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            chat_id: SIGMA_BOT_CHAT_ID,
-            text: buyCommand,
-          }),
-        }
-      );
-      
-      if (!response.ok) {
-        const errorData = await response.json();
-        console.error("Telegram API error:", errorData);
-        return { success: false, error: `Telegram error: ${errorData.description || response.status}` };
-      }
-      
-      const result = await response.json();
-      console.log("Sigma Bot buy command sent:", result);
-      return { success: true };
-    } catch (error) {
-      console.error("Failed to send Sigma command:", error);
-      return { success: false, error: error instanceof Error ? error.message : "Unknown error" };
-    }
-  }
-  
-  // Fallback: Log that we would have sent the command
-  console.log(`[DRY RUN] Would send to Sigma Bot: ${buyCommand}`);
-  return { success: true };
-}
+// Note: Sigma Bot DM is now handled by the Python worker via Telethon (user session)
+// This function just creates the trade record - worker will execute via DM
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -215,7 +162,7 @@ Deno.serve(async (req) => {
             stop_loss_pct: config.stop_loss_pct,
             take_profit_1_pct: config.take_profit_1_pct,
             take_profit_2_pct: config.take_profit_2_pct,
-            status: "pending_buy",
+            status: "pending_sigma", // Worker will DM Sigma Bot
           })
           .select()
           .single();
@@ -224,74 +171,34 @@ Deno.serve(async (req) => {
           throw insertError;
         }
 
-        // Send buy command to Sigma Bot
-        const buyResult = await sendSigmaBuyCommand(
-          contractAddress,
-          config.allocation_sol,
-          tokenSymbol
+        // Log that trade is queued for worker to execute
+        await supabase.from("relay_logs").insert({
+          level: "info",
+          message: `🔄 TRADE QUEUED: ${tokenSymbol || "Token"} from #${channel_name}`,
+          channel_name,
+          signal_type: "trade_queued",
+          author_name,
+          original_text: message_text.substring(0, 500),
+          formatted_text: `/buy ${contractAddress} ${config.allocation_sol}`,
+          details: `Allocation: ${config.allocation_sol} SOL | Pending worker DM to Sigma Bot`,
+          metadata: {
+            trade_id: trade.id,
+            contract_address: contractAddress,
+            token_symbol: tokenSymbol,
+            allocation_sol: config.allocation_sol,
+          },
+        });
+
+        return new Response(
+          JSON.stringify({ 
+            success: true, 
+            trade_id: trade.id,
+            contract_address: contractAddress,
+            allocation_sol: config.allocation_sol,
+            status: "pending_sigma",
+          }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
-
-        if (buyResult.success) {
-          // Update trade status
-          await supabase
-            .from("trades")
-            .update({
-              status: "bought",
-              sigma_buy_sent_at: new Date().toISOString(),
-            })
-            .eq("id", trade.id);
-
-          // Log success
-          await supabase.from("relay_logs").insert({
-            level: "success",
-            message: `🤖 TRADE EXECUTED: ${tokenSymbol || "Token"} from #${channel_name}`,
-            channel_name,
-            signal_type: "trade",
-            author_name,
-            original_text: message_text.substring(0, 500),
-            formatted_text: `/buy ${contractAddress} ${config.allocation_sol}`,
-            details: `Allocation: ${config.allocation_sol} SOL | SL: ${config.stop_loss_pct}% | TP1: ${config.take_profit_1_pct}% | TP2: ${config.take_profit_2_pct}%`,
-            metadata: {
-              trade_id: trade.id,
-              contract_address: contractAddress,
-              token_symbol: tokenSymbol,
-              allocation_sol: config.allocation_sol,
-            },
-          });
-
-          return new Response(
-            JSON.stringify({ 
-              success: true, 
-              trade_id: trade.id,
-              contract_address: contractAddress,
-              allocation_sol: config.allocation_sol,
-            }),
-            { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-          );
-        } else {
-          // Update trade with error
-          await supabase
-            .from("trades")
-            .update({
-              status: "failed",
-              error_message: buyResult.error,
-            })
-            .eq("id", trade.id);
-
-          await supabase.from("relay_logs").insert({
-            level: "error",
-            message: `❌ TRADE FAILED: ${tokenSymbol || contractAddress}`,
-            channel_name,
-            signal_type: "trade_error",
-            details: buyResult.error,
-            metadata: { trade_id: trade.id, error: buyResult.error },
-          });
-
-          return new Response(
-            JSON.stringify({ success: false, error: buyResult.error }),
-            { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-          );
-        }
       }
 
       case "get_open_trades": {
