@@ -1206,7 +1206,12 @@ class TelegramSender:
             logger.error(f"Failed to init Sigma Bot: {e}")
     
     async def send_sigma_buy_command(self, trade: dict) -> bool:
-        """Send a buy command to Sigma Bot via DM."""
+        """Send a buy command to Sigma Bot via DM.
+        
+        Sigma Bot expects just the contract address pasted directly.
+        It uses the pre-configured allocation from Sigma's settings.
+        Example: GMvCfcZg8YvkkQmwDaAzCtHDrrEtgE74nQpQ7xNabonk
+        """
         if not self.sigma_entity:
             await self._init_sigma_bot()
             if not self.sigma_entity:
@@ -1215,16 +1220,15 @@ class TelegramSender:
         
         try:
             contract_address = trade.get('contract_address')
-            allocation_sol = trade.get('allocation_sol', 0.1)
             
-            # Format the buy command as Sigma Bot expects
-            buy_command = f"/buy {contract_address} {allocation_sol}"
+            # Sigma Bot expects just the CA pasted directly (Auto Buy mode)
+            # It uses the allocation configured in Sigma's settings, not per-command
             
-            # Send DM to Sigma Bot
-            await self.client.send_message(self.sigma_entity, buy_command)
+            # Send DM to Sigma Bot with just the CA
+            await self.client.send_message(self.sigma_entity, contract_address)
             
-            logger.info(f"🤖 Sent buy command to Sigma Bot: {buy_command[:50]}...")
-            await self.api.log('success', f"🤖 TRADE SENT: {trade.get('token_symbol') or contract_address[:12]}", trade.get('channel_name'), f"Command: {buy_command}")
+            logger.info(f"🤖 Sent CA to Sigma Bot: {contract_address[:20]}...")
+            await self.api.log('success', f"🤖 TRADE SENT: {trade.get('token_symbol') or contract_address[:12]}", trade.get('channel_name'), f"CA: {contract_address}")
             
             return True
         except Exception as e:
