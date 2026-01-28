@@ -284,24 +284,75 @@ class APIClient:
             logger.error(f"Failed to update sell as failed: {e}")
             return False
     
-
-        """Acknowledge a command has been processed."""
+    async def get_open_positions(self) -> list[dict]:
+        """Fetch open positions for monitoring."""
+        try:
+            response = await self.client.get(
+                f"{self.base_url}/worker-pull",
+                params={"action": "get_open_positions"},
+                headers=self.headers
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data.get('positions', [])
+        except Exception as e:
+            logger.error(f"Failed to fetch open positions: {e}")
+            return []
+    
+    async def update_position_price(self, trade_id: str, current_price: float, current_value_sol: float = None) -> Optional[dict]:
+        """Update position price and check for auto-sell triggers."""
         try:
             response = await self.client.post(
                 f"{self.base_url}/worker-pull",
-                params={"action": "ack_command"},
+                params={"action": "update_position_price"},
                 headers=self.headers,
                 json={
-                    "commandId": command_id,
-                    "result": result,
-                    "success": success
+                    "trade_id": trade_id,
+                    "current_price": current_price,
+                    "current_value_sol": current_value_sol
+                }
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to update position price: {e}")
+            return None
+    
+    async def trigger_auto_sell(self, trade_id: str, percentage: int, reason: str) -> bool:
+        """Trigger an auto-sell for a position."""
+        try:
+            response = await self.client.post(
+                f"{self.base_url}/worker-pull",
+                params={"action": "trigger_auto_sell"},
+                headers=self.headers,
+                json={
+                    "trade_id": trade_id,
+                    "percentage": percentage,
+                    "reason": reason
                 }
             )
             response.raise_for_status()
             return True
         except Exception as e:
-            logger.error(f"Failed to acknowledge command: {e}")
+            logger.error(f"Failed to trigger auto-sell: {e}")
             return False
+    
+    async def update_partial_tp1(self, trade_id: str) -> bool:
+        """Update trade status to partial_tp1 after TP1 hit."""
+        try:
+            response = await self.client.post(
+                f"{self.base_url}/worker-pull",
+                params={"action": "update_partial_tp1"},
+                headers=self.headers,
+                json={"trade_id": trade_id}
+            )
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update partial TP1: {e}")
+            return False
+    
+    async def ack_command(self, command_id: str, result: str, success: bool) -> bool:
     
     async def send_heartbeat(self) -> bool:
         """Send a heartbeat to indicate worker is alive."""
@@ -1375,8 +1426,10 @@ class DiscordTelegramRelay:
             
             # Add Solana Jupiter trader if configured (all trading via Jupiter direct)
             if self.solana_trader:
+                # Run both trade processing and position monitoring
                 tasks.append(self.solana_trader.process_pending_trades())
-                logger.info("🚀 Solana Jupiter trading enabled")
+                tasks.append(self.solana_trader.monitor_positions())
+                logger.info("🚀 Solana Jupiter trading + position monitor enabled")
             else:
                 logger.warning("⚠️ SOLANA_PRIVATE_KEY not set - trading disabled")
             

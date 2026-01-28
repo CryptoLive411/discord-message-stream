@@ -67,7 +67,7 @@ export function useTrades(limit = 100) {
   });
 }
 
-// Fetch open positions only
+// Fetch open positions (including queued trades)
 export function useOpenPositions() {
   return useQuery({
     queryKey: ['openPositions'],
@@ -75,13 +75,13 @@ export function useOpenPositions() {
       const { data, error } = await supabase
         .from('trades')
         .select('*')
-        .in('status', ['bought', 'partial_tp1', 'pending_sigma'])
+        .in('status', ['pending_sigma', 'bought', 'partial_tp1'])
         .order('created_at', { ascending: false });
 
       if (error) throw error;
       return data || [];
     },
-    refetchInterval: 5000, // Refresh every 5 seconds for active positions
+    refetchInterval: 3000, // Refresh every 3 seconds for real-time updates
   });
 }
 

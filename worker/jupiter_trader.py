@@ -3,9 +3,7 @@
 Jupiter Solana Trader Module
 ============================
 Executes SOL <-> Token swaps via Jupiter Aggregator V6 API.
-
-This is a standalone module that integrates with the worker 
-WITHOUT modifying existing tracker functions.
+Includes Position Manager for auto-sell based on TP/SL thresholds.
 
 Usage:
     from jupiter_trader import SolanaTrader
@@ -23,6 +21,7 @@ from dataclasses import dataclass
 
 import httpx
 from solders.keypair import Keypair
+from solders.pubkey import Pubkey
 from solders.transaction import VersionedTransaction
 from solana.rpc.async_api import AsyncClient
 from solana.rpc.commitment import Confirmed
@@ -35,6 +34,7 @@ logger = logging.getLogger('jupiter_trader')
 
 JUPITER_QUOTE_API = "https://quote-api.jup.ag/v6/quote"
 JUPITER_SWAP_API = "https://quote-api.jup.ag/v6/swap"
+JUPITER_PRICE_API = "https://api.jup.ag/price/v2"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
@@ -44,6 +44,9 @@ RPC_ENDPOINTS = [
     "https://solana-mainnet.g.alchemy.com/v2/demo",
     "https://rpc.ankr.com/solana",
 ]
+
+# Position monitoring interval
+POSITION_CHECK_INTERVAL = 10  # seconds
 
 # ============================================================================
 # Trade Result
@@ -56,6 +59,7 @@ class TradeResult:
     signature: Optional[str] = None
     error: Optional[str] = None
     expected_output: Optional[float] = None
+    tokens_received: Optional[int] = None
 
 # ============================================================================
 # Solana Trader
@@ -69,6 +73,7 @@ class SolanaTrader:
     - Wallet management from private key
     - Jupiter quote fetching
     - Swap transaction execution
+    - Position monitoring with auto-sell triggers
     - Trade status updates via API client
     """
     
@@ -137,6 +142,29 @@ class SolanaTrader:
         resp = await self.rpc.get_balance(self.keypair.pubkey())
         return resp.value / 1_000_000_000
     
+    async def get_token_balance(self, mint_address: str) -> Optional[int]:
+        """Get token balance for a specific mint."""
+        if not self.rpc:
+            await self.connect_rpc()
+        
+        try:
+            token_accounts = await self.rpc.get_token_accounts_by_owner(
+                self.keypair.pubkey(),
+                {"mint": Pubkey.from_string(mint_address)}
+            )
+            
+            if not token_accounts.value:
+                return 0
+            
+            account_data = token_accounts.value[0].account.data
+            # Parse token amount from account data (bytes 64-72 contain the amount)
+            token_amount = int.from_bytes(account_data[64:72], 'little')
+            return token_amount
+            
+        except Exception as e:
+            logger.error(f"Failed to get token balance: {e}")
+            return None
+    
     async def get_quote(
         self,
         input_mint: str,
@@ -170,6 +198,23 @@ class SolanaTrader:
             
         except Exception as e:
             logger.error(f"Jupiter quote failed: {e}")
+            return None
+    
+    async def get_token_price_sol(self, mint_address: str) -> Optional[float]:
+        """Get token price in SOL using Jupiter price API."""
+        try:
+            params = {"ids": mint_address, "vsToken": SOL_MINT}
+            response = await self.http.get(JUPITER_PRICE_API, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+            price_data = data.get("data", {}).get(mint_address)
+            if price_data:
+                return float(price_data.get("price", 0))
+            return None
+            
+        except Exception as e:
+            logger.debug(f"Price fetch failed for {mint_address[:8]}...: {e}")
             return None
     
     async def execute_swap(self, quote: dict) -> TradeResult:
@@ -223,13 +268,20 @@ class SolanaTrader:
             signature = str(result.value)
             logger.info(f"📤 TX sent: {signature}")
             
-            # Wait for confirmation
-            await self.rpc.confirm_transaction(signature, commitment=Confirmed)
+            # Wait for confirmation with timeout
+            try:
+                await asyncio.wait_for(
+                    self.rpc.confirm_transaction(signature, commitment=Confirmed),
+                    timeout=60.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"TX confirmation timeout, but tx was sent: {signature}")
             
             return TradeResult(
                 success=True,
                 signature=signature,
-                expected_output=int(quote.get("outAmount", 0))
+                expected_output=int(quote.get("outAmount", 0)),
+                tokens_received=int(quote.get("outAmount", 0))
             )
             
         except Exception as e:
@@ -256,6 +308,11 @@ class SolanaTrader:
         lamports = int(amount_sol * 1_000_000_000)
         
         logger.info(f"🛒 Buying token {contract_address[:8]}... with {amount_sol} SOL")
+        
+        # Verify we have enough SOL
+        balance = await self.get_balance()
+        if balance < amount_sol + 0.01:  # Leave 0.01 SOL for fees
+            return TradeResult(success=False, error=f"Insufficient SOL balance: {balance:.4f}")
         
         quote = await self.get_quote(SOL_MINT, contract_address, lamports, slippage_bps)
         if not quote:
@@ -290,21 +347,11 @@ class SolanaTrader:
         if not self.rpc:
             await self.connect_rpc()
         
-        from solders.pubkey import Pubkey
-        from spl.token.constants import TOKEN_PROGRAM_ID
-        
         # Get token balance
-        token_accounts = await self.rpc.get_token_accounts_by_owner(
-            self.keypair.pubkey(),
-            {"mint": Pubkey.from_string(contract_address)}
-        )
+        token_amount = await self.get_token_balance(contract_address)
         
-        if not token_accounts.value:
+        if token_amount is None or token_amount <= 0:
             return TradeResult(success=False, error="No token balance found")
-        
-        account_data = token_accounts.value[0].account.data
-        # Parse token amount from account data
-        token_amount = int.from_bytes(account_data[64:72], 'little')
         
         sell_amount = (token_amount * percentage) // 100
         if sell_amount <= 0:
@@ -407,6 +454,11 @@ class SolanaTrader:
                                 f'💰 SELL EXECUTED: {percentage}% → {realized_sol:.4f} SOL',
                                 details=f'TX: {result.signature}'
                             )
+                            
+                            # Update trade status if this was a TP1 sell (50%)
+                            trade_id = sell.get('trade_id')
+                            if trade_id and percentage == 50:
+                                await self.api.update_partial_tp1(trade_id)
                         else:
                             await self.api.update_sell_failed(sell_id, result.error)
                             await self.api.log(
@@ -420,11 +472,82 @@ class SolanaTrader:
                         await self.api.update_sell_failed(sell_id, str(e))
                 
                 # Wait before next poll
-                await asyncio.sleep(5)
+                await asyncio.sleep(3)
                 
             except Exception as e:
                 logger.error(f"Trade processor error: {e}")
                 await asyncio.sleep(10)
+    
+    async def monitor_positions(self):
+        """
+        Monitor open positions and trigger auto-sells based on TP/SL.
+        
+        This runs as a separate loop alongside trade processing.
+        """
+        logger.info("📊 Starting position monitor...")
+        
+        while self.running:
+            try:
+                positions = await self.api.get_open_positions()
+                
+                for pos in positions:
+                    trade_id = pos.get('id')
+                    contract_address = pos.get('contract_address')
+                    entry_price = pos.get('entry_price')
+                    status = pos.get('status')
+                    
+                    if not contract_address or not entry_price:
+                        continue
+                    
+                    # Get current token price
+                    current_price = await self.get_token_price_sol(contract_address)
+                    
+                    if current_price is None:
+                        # Fallback: use quote to estimate value
+                        token_balance = await self.get_token_balance(contract_address)
+                        if token_balance and token_balance > 0:
+                            quote = await self.get_quote(contract_address, SOL_MINT, token_balance, 100)
+                            if quote:
+                                current_value = int(quote.get("outAmount", 0)) / 1_000_000_000
+                                # Rough price per token
+                                current_price = current_value / (token_balance / 1_000_000)
+                    
+                    if current_price is None:
+                        continue
+                    
+                    # Update price and check for triggers
+                    result = await self.api.update_position_price(
+                        trade_id,
+                        current_price=current_price,
+                        current_value_sol=None  # Could calculate if needed
+                    )
+                    
+                    if result and result.get('action_needed'):
+                        action = result['action_needed']
+                        sell_pct = result.get('sell_percentage', 100)
+                        pnl = result.get('pnl_pct', 0)
+                        
+                        logger.info(f"🔔 {action.upper()} triggered for {contract_address[:8]}... (PnL: {pnl:.1f}%)")
+                        
+                        # Trigger auto-sell
+                        await self.api.trigger_auto_sell(
+                            trade_id,
+                            percentage=sell_pct,
+                            reason=f"{action} at {pnl:.1f}%"
+                        )
+                
+                await asyncio.sleep(POSITION_CHECK_INTERVAL)
+                
+            except Exception as e:
+                logger.error(f"Position monitor error: {e}")
+                await asyncio.sleep(30)
+    
+    async def run(self):
+        """Run both trade processing and position monitoring."""
+        await asyncio.gather(
+            self.process_pending_trades(),
+            self.monitor_positions()
+        )
     
     async def stop(self):
         """Stop the trader gracefully."""
