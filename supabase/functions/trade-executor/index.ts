@@ -7,8 +7,11 @@ const corsHeaders = {
 
 // Extract contract address from message text
 function extractContractAddress(messageText: string): string | null {
-  // Solana address pattern (32-44 base58 chars)
-  const solanaPattern = /[1-9A-HJ-NP-Za-km-z]{32,44}/g;
+  // Solana address pattern - alphanumeric, typically 32-44 chars
+  // Base58 chars are: 123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz
+  // But pump.fun addresses often end in "pump" which includes 'l' and 'o'
+  // Using broader pattern to catch all Solana-style addresses
+  const solanaPattern = /[1-9A-Za-z]{32,44}/g;
   // ETH address pattern
   const ethPattern = /0x[a-fA-F0-9]{40}/g;
   
@@ -19,8 +22,10 @@ function extractContractAddress(messageText: string): string | null {
   if (solanaMatches && solanaMatches.length > 0) {
     // Filter out common false positives
     const validCAs = solanaMatches.filter(ca => {
-      // Skip if it looks like a transaction hash or other non-CA string
+      // Skip if it looks like a word or common false positive
       if (ca.length < 32 || ca.length > 44) return false;
+      // Must contain both letters and numbers (addresses always do)
+      if (!/[0-9]/.test(ca) || !/[a-zA-Z]/.test(ca)) return false;
       return true;
     });
     if (validCAs.length > 0) return validCAs[0];
