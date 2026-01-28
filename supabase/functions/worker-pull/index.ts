@@ -338,17 +338,136 @@ Deno.serve(async (req) => {
         );
       }
 
-      case "mark_trade_sent": {
-        // Mark a trade as sent to Sigma Bot
+      case "get_open_positions": {
+        // Get all open positions for price monitoring
+        const { data: positions, error } = await supabase
+          .from("trades")
+          .select("*")
+          .in("status", ["bought", "partial_tp1"])
+          .order("created_at", { ascending: false });
+
+        if (error) throw error;
+
+        return new Response(
+          JSON.stringify({ positions: positions || [] }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      case "update_position_price": {
+        // Update current price and check for auto-sell triggers
+        const body = await req.json();
+        const { trade_id, current_price, current_value_sol } = body;
+
+        const { data: trade } = await supabase
+          .from("trades")
+          .select("*")
+          .eq("id", trade_id)
+          .single();
+
+        if (!trade || !trade.entry_price) {
+          return new Response(
+            JSON.stringify({ success: false, error: "Trade not found or no entry price" }),
+            { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // Calculate PnL percentage
+        const pnlPct = ((current_price - trade.entry_price) / trade.entry_price) * 100;
+
+        await supabase
+          .from("trades")
+          .update({ current_price })
+          .eq("id", trade_id);
+
+        // Determine if auto-sell should trigger
+        let action_needed = null;
+        let sell_percentage = 0;
+
+        // Stop-loss check
+        if (pnlPct <= trade.stop_loss_pct) {
+          action_needed = "stop_loss";
+          sell_percentage = 100;
+        }
+        // TP1 check (only if still in "bought" status)
+        else if (trade.status === "bought" && pnlPct >= trade.take_profit_1_pct) {
+          action_needed = "take_profit_1";
+          sell_percentage = 50;
+        }
+        // TP2 check (only if already hit TP1)
+        else if (trade.status === "partial_tp1" && pnlPct >= trade.take_profit_2_pct) {
+          action_needed = "take_profit_2";
+          sell_percentage = 100; // Sell remaining
+        }
+
+        return new Response(
+          JSON.stringify({ 
+            success: true, 
+            pnl_pct: pnlPct,
+            action_needed,
+            sell_percentage,
+            current_value_sol,
+          }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      case "trigger_auto_sell": {
+        // Create a sell request triggered by position manager
+        const body = await req.json();
+        const { trade_id, percentage, reason } = body;
+
+        // Check if there's already a pending sell for this trade
+        const { data: existingSell } = await supabase
+          .from("sell_requests")
+          .select("id")
+          .eq("trade_id", trade_id)
+          .eq("status", "pending")
+          .maybeSingle();
+
+        if (existingSell) {
+          return new Response(
+            JSON.stringify({ success: false, error: "Sell already pending" }),
+            { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const { data: sellReq, error } = await supabase
+          .from("sell_requests")
+          .insert({
+            trade_id,
+            percentage,
+            slippage_bps: 150, // Slightly higher for auto-sells
+            status: "pending",
+          })
+          .select()
+          .single();
+
+        if (error) throw error;
+
+        // Log the auto-sell trigger
+        await supabase.from("relay_logs").insert({
+          level: "info",
+          message: `🔔 AUTO-SELL TRIGGERED: ${reason}`,
+          signal_type: "auto_sell",
+          details: `Selling ${percentage}% of position`,
+          metadata: { trade_id, percentage, reason },
+        });
+
+        return new Response(
+          JSON.stringify({ success: true, sell_id: sellReq.id }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      case "update_partial_tp1": {
+        // Update trade status after TP1 hit (sold 50%)
         const body = await req.json();
         const { trade_id } = body;
 
         const { error } = await supabase
           .from("trades")
-          .update({
-            status: "bought",
-            sigma_buy_sent_at: new Date().toISOString(),
-          })
+          .update({ status: "partial_tp1" })
           .eq("id", trade_id);
 
         if (error) throw error;
