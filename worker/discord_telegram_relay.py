@@ -200,6 +200,55 @@ class APIClient:
             logger.error(f"Failed to fetch pending trades: {e}")
             return []
     
+    async def get_pending_sigma_trades(self) -> list[dict]:
+        """Fetch trades pending direct Solana execution."""
+        try:
+            response = await self.client.get(
+                f"{self.base_url}/worker-pull",
+                params={"action": "get_pending_sigma_trades"},
+                headers=self.headers
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data.get('trades', [])
+        except Exception as e:
+            logger.error(f"Failed to fetch pending sigma trades: {e}")
+            return []
+    
+    async def update_trade_bought(self, trade_id: str, signature: str, expected_tokens: int = None) -> bool:
+        """Mark a trade as bought with TX signature."""
+        try:
+            response = await self.client.post(
+                f"{self.base_url}/worker-pull",
+                params={"action": "update_trade_bought"},
+                headers=self.headers,
+                json={
+                    "trade_id": trade_id,
+                    "signature": signature,
+                    "expected_tokens": expected_tokens
+                }
+            )
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update trade as bought: {e}")
+            return False
+    
+    async def update_trade_failed(self, trade_id: str, error_message: str) -> bool:
+        """Mark a trade as failed with error message."""
+        try:
+            response = await self.client.post(
+                f"{self.base_url}/worker-pull",
+                params={"action": "update_trade_failed"},
+                headers=self.headers,
+                json={"trade_id": trade_id, "error_message": error_message}
+            )
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update trade as failed: {e}")
+            return False
+    
     async def mark_trade_sent(self, trade_id: str) -> bool:
         """Mark a trade as sent to Sigma Bot."""
         try:
@@ -1372,7 +1421,18 @@ class DiscordTelegramRelay:
         self.api = APIClient(self.config)
         self.discord_watcher = DiscordWatcher(self.config, self.api)
         self.telegram_sender = TelegramSender(self.config, self.api)
+        self.solana_trader = None  # Optional Solana trading module
         self.running = False
+        
+        # Initialize Solana trader if private key is configured
+        solana_key = os.getenv('SOLANA_PRIVATE_KEY')
+        if solana_key:
+            try:
+                from jupiter_trader import SolanaTrader
+                self.solana_trader = SolanaTrader(self.api, solana_key)
+                logger.info("🔑 Solana trading module enabled")
+            except Exception as e:
+                logger.warning(f"Solana trader init failed (optional): {e}")
     
     async def start(self):
         """Start the relay."""
@@ -1397,13 +1457,21 @@ class DiscordTelegramRelay:
             
             await self.api.log('info', 'Discord to Telegram relay started (real-time mode + trading)')
             
-            # Run all loops: watch, send, trade processing, heartbeat
-            await asyncio.gather(
+            # Build the list of concurrent tasks
+            tasks = [
                 self.discord_watcher.watch_channels(),
                 self.telegram_sender.send_pending_messages(),
-                self.telegram_sender.process_pending_trades(),  # NEW: Process trades via Sigma Bot DM
+                self.telegram_sender.process_pending_trades(),  # Process trades via Sigma Bot DM
                 self._heartbeat()
-            )
+            ]
+            
+            # Add Solana trader if configured
+            if self.solana_trader:
+                tasks.append(self.solana_trader.process_pending_trades())
+                logger.info("🚀 Solana direct trading enabled")
+            
+            # Run all loops concurrently
+            await asyncio.gather(*tasks)
             
         except Exception as e:
             logger.error(f"Relay error: {e}")

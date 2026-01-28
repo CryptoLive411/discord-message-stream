@@ -246,6 +246,98 @@ Deno.serve(async (req) => {
         );
       }
 
+      case "get_pending_sigma_trades": {
+        // Get trades pending direct Solana execution (for Python trader)
+        const { data: trades, error } = await supabase
+          .from("trades")
+          .select("*")
+          .eq("status", "pending_sigma")
+          .lt("retry_count", 3)
+          .order("created_at")
+          .limit(5);
+
+        if (error) throw error;
+
+        return new Response(
+          JSON.stringify({ trades: trades || [] }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      case "update_trade_bought": {
+        // Mark trade as bought with TX signature
+        const body = await req.json();
+        const { trade_id, signature, expected_tokens } = body;
+
+        // Calculate rough entry price
+        const { data: trade } = await supabase
+          .from("trades")
+          .select("allocation_sol")
+          .eq("id", trade_id)
+          .single();
+
+        const entryPrice = trade?.allocation_sol && expected_tokens 
+          ? trade.allocation_sol / (expected_tokens / 1_000_000) 
+          : null;
+
+        const { error } = await supabase
+          .from("trades")
+          .update({
+            status: "bought",
+            buy_tx_hash: signature,
+            entry_price: entryPrice,
+            sigma_buy_sent_at: new Date().toISOString(),
+          })
+          .eq("id", trade_id);
+
+        if (error) throw error;
+
+        // Log success
+        await supabase.from("relay_logs").insert({
+          level: "success",
+          message: `✅ BUY EXECUTED via Jupiter`,
+          signal_type: "trade_executed",
+          details: `TX: ${signature}`,
+          metadata: { trade_id, signature, expected_tokens },
+        });
+
+        return new Response(
+          JSON.stringify({ success: true }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      case "update_trade_failed": {
+        // Mark trade as failed with retry logic
+        const body = await req.json();
+        const { trade_id, error_message } = body;
+
+        const { data: trade } = await supabase
+          .from("trades")
+          .select("retry_count")
+          .eq("id", trade_id)
+          .single();
+
+        const newRetryCount = (trade?.retry_count || 0) + 1;
+        const newStatus = newRetryCount >= 3 ? "failed" : "pending_sigma";
+
+        const { error } = await supabase
+          .from("trades")
+          .update({
+            status: newStatus,
+            error_message,
+            retry_count: newRetryCount,
+          })
+          .eq("id", trade_id);
+
+        if (error) throw error;
+
+        return new Response(
+          JSON.stringify({ success: true, retry_count: newRetryCount }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
       case "mark_trade_sent": {
         // Mark a trade as sent to Sigma Bot
         const body = await req.json();
@@ -300,7 +392,7 @@ Deno.serve(async (req) => {
 
       default:
         return new Response(
-          JSON.stringify({ error: "Unknown action. Use: get_channels, get_pending_messages, get_telegram_config, get_stats, get_connection_status, get_banned_authors, get_trading_config, get_pending_trades" }),
+          JSON.stringify({ error: "Unknown action. Use: get_channels, get_pending_messages, get_telegram_config, get_stats, get_connection_status, get_banned_authors, get_trading_config, get_pending_trades, get_pending_sigma_trades, update_trade_bought, update_trade_failed" }),
           { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
     }
