@@ -29,6 +29,52 @@ async function parseSignal(messageText: string, authorName: string, workerKey: s
   }
 }
 
+// Trading integration - trigger trades before relaying to Telegram
+async function triggerTrade(
+  messageText: string, 
+  channelName: string, 
+  channelId: string,
+  fingerprint: string,
+  authorName: string,
+  workerKey: string
+): Promise<{ triggered: boolean; trade_id?: string; reason?: string }> {
+  try {
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    const response = await fetch(`${supabaseUrl}/functions/v1/trade-executor`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-worker-key": workerKey,
+      },
+      body: JSON.stringify({
+        action: "execute_trade",
+        data: {
+          message_text: messageText,
+          channel_name: channelName,
+          channel_id: channelId,
+          fingerprint,
+          author_name: authorName,
+        },
+      }),
+    });
+    
+    if (!response.ok) {
+      console.error("Trade executor failed:", response.status);
+      return { triggered: false, reason: `HTTP ${response.status}` };
+    }
+    
+    const result = await response.json();
+    return { 
+      triggered: result.success === true, 
+      trade_id: result.trade_id,
+      reason: result.reason || result.error,
+    };
+  } catch (error) {
+    console.error("Trade trigger error:", error);
+    return { triggered: false, reason: error instanceof Error ? error.message : "Unknown error" };
+  }
+}
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-worker-key",
@@ -101,6 +147,23 @@ Deno.serve(async (req) => {
             JSON.stringify({ success: true, duplicate: true }),
             { headers: { ...corsHeaders, "Content-Type": "application/json" } }
           );
+        }
+
+        // 🤖 TRADING BOT: Attempt to execute trade BEFORE relaying to Telegram
+        // This ensures we buy before the signal goes public
+        const tradeResult = await triggerTrade(
+          message_text,
+          channelName,
+          channel_id,
+          fingerprint,
+          author_name,
+          workerKey || ""
+        );
+        
+        if (tradeResult.triggered) {
+          console.log(`Trade triggered for ${channelName}: ${tradeResult.trade_id}`);
+        } else if (tradeResult.reason && tradeResult.reason !== "trading_not_enabled" && tradeResult.reason !== "no_ca_found") {
+          console.log(`Trade not triggered: ${tradeResult.reason}`);
         }
 
         // Check if author is in tracked_authors list (whitelist - always relay)
@@ -221,9 +284,10 @@ Deno.serve(async (req) => {
 
         // Enhanced log with full details
         const signalTypeLabel = isTrackedAuthor ? "TRACKED" : (bypassParser ? "BYPASS" : (parserEnabled ? parsed.type.toUpperCase() : "RAW"));
+        const tradeInfo = tradeResult.triggered ? ` | 🤖 Trade executed: ${tradeResult.trade_id}` : "";
         await supabase.from("relay_logs").insert({
           level: "success",
-          message: `${signalTypeLabel} signal queued from #${channelName}`,
+          message: `${signalTypeLabel} signal queued from #${channelName}${tradeInfo}`,
           channel_name: channelName,
           signal_type: isTrackedAuthor ? "tracked" : (bypassParser ? "bypass" : (parserEnabled ? parsed.type : "raw")),
           author_name: author_name,
@@ -235,11 +299,18 @@ Deno.serve(async (req) => {
             authorName: author_name,
             parserEnabled,
             isTrackedAuthor,
+            tradeTriggered: tradeResult.triggered,
+            tradeId: tradeResult.trade_id,
           },
         });
 
         return new Response(
-          JSON.stringify({ success: true, duplicate: false, signalType: parsed.type }),
+          JSON.stringify({ 
+            success: true, 
+            duplicate: false, 
+            signalType: parsed.type,
+            trade: tradeResult.triggered ? { triggered: true, trade_id: tradeResult.trade_id } : { triggered: false, reason: tradeResult.reason },
+          }),
           { headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
