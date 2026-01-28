@@ -172,7 +172,7 @@ class APIClient:
             return []
     
     async def get_trading_config(self) -> Optional[dict]:
-        """Fetch trading configuration including sigma bot ID."""
+        """Fetch trading configuration (channel allocations)."""
         try:
             response = await self.client.get(
                 f"{self.base_url}/worker-pull",
@@ -185,23 +185,8 @@ class APIClient:
             logger.error(f"Failed to fetch trading config: {e}")
             return None
     
-    async def get_pending_trades(self) -> list[dict]:
-        """Fetch trades pending Sigma Bot DM execution."""
-        try:
-            response = await self.client.get(
-                f"{self.base_url}/worker-pull",
-                params={"action": "get_pending_trades"},
-                headers=self.headers
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data.get('trades', [])
-        except Exception as e:
-            logger.error(f"Failed to fetch pending trades: {e}")
-            return []
-    
     async def get_pending_sigma_trades(self) -> list[dict]:
-        """Fetch trades pending direct Solana execution."""
+        """Fetch trades pending Jupiter execution."""
         try:
             response = await self.client.get(
                 f"{self.base_url}/worker-pull",
@@ -212,7 +197,7 @@ class APIClient:
             data = response.json()
             return data.get('trades', [])
         except Exception as e:
-            logger.error(f"Failed to fetch pending sigma trades: {e}")
+            logger.error(f"Failed to fetch pending trades: {e}")
             return []
     
     async def update_trade_bought(self, trade_id: str, signature: str, expected_tokens: int = None) -> bool:
@@ -249,35 +234,6 @@ class APIClient:
             logger.error(f"Failed to update trade as failed: {e}")
             return False
     
-    async def mark_trade_sent(self, trade_id: str) -> bool:
-        """Mark a trade as sent to Sigma Bot."""
-        try:
-            response = await self.client.post(
-                f"{self.base_url}/worker-pull",
-                params={"action": "mark_trade_sent"},
-                headers=self.headers,
-                json={"trade_id": trade_id}
-            )
-            response.raise_for_status()
-            return True
-        except Exception as e:
-            logger.error(f"Failed to mark trade as sent: {e}")
-            return False
-    
-    async def mark_trade_failed(self, trade_id: str, error_message: str) -> bool:
-        """Mark a trade as failed."""
-        try:
-            response = await self.client.post(
-                f"{self.base_url}/worker-pull",
-                params={"action": "mark_trade_failed"},
-                headers=self.headers,
-                json={"trade_id": trade_id, "error_message": error_message}
-            )
-            response.raise_for_status()
-            return True
-        except Exception as e:
-            logger.error(f"Failed to mark trade as failed: {e}")
-            return []
     
     async def ack_command(self, command_id: str, result: str, success: bool) -> bool:
         """Acknowledge a command has been processed."""
@@ -1170,8 +1126,6 @@ class TelegramSender:
         self.client: Optional[TelegramClient] = None
         self.running = False
         self.destination = None
-        self.sigma_bot_id: Optional[int] = None
-        self.sigma_entity = None
     
     async def start(self):
         """Start the Telegram client and authenticate."""
@@ -1227,101 +1181,7 @@ class TelegramSender:
         """Format a message for Telegram - text only, no username."""
         return (msg.get('message_text') or '').strip()
     
-    async def _init_sigma_bot(self):
-        """Initialize connection to Sigma Bot for trading commands."""
-        try:
-            trading_config = await self.api.get_trading_config()
-            if not trading_config:
-                logger.info("No trading config available")
-                return
-            
-            sigma_bot_id = trading_config.get('sigma_bot_id')
-            if not sigma_bot_id:
-                logger.info("Sigma Bot ID not configured")
-                return
-            
-            # Convert to int (it may come as string from JSON)
-            self.sigma_bot_id = int(sigma_bot_id)
-            
-            # Resolve the Sigma Bot entity
-            try:
-                self.sigma_entity = await self.client.get_entity(self.sigma_bot_id)
-                logger.info(f"Sigma Bot connected: {self.sigma_entity.first_name if hasattr(self.sigma_entity, 'first_name') else self.sigma_bot_id}")
-                await self.api.log('info', f'Connected to Sigma Bot for trading')
-            except Exception as e:
-                logger.warning(f"Could not resolve Sigma Bot entity: {e}")
-                self.sigma_entity = None
-        except Exception as e:
-            logger.error(f"Failed to init Sigma Bot: {e}")
-    
-    async def send_sigma_buy_command(self, trade: dict) -> bool:
-        """Send a buy command to Sigma Bot via DM.
-        
-        Sigma Bot expects just the contract address pasted directly.
-        It uses the pre-configured allocation from Sigma's settings.
-        Example: GMvCfcZg8YvkkQmwDaAzCtHDrrEtgE74nQpQ7xNabonk
-        """
-        if not self.sigma_entity:
-            await self._init_sigma_bot()
-            if not self.sigma_entity:
-                logger.error("Sigma Bot not available for trading")
-                return False
-        
-        try:
-            contract_address = trade.get('contract_address')
-            
-            # Sigma Bot expects just the CA pasted directly (Auto Buy mode)
-            # It uses the allocation configured in Sigma's settings, not per-command
-            
-            # Send DM to Sigma Bot with just the CA
-            await self.client.send_message(self.sigma_entity, contract_address)
-            
-            logger.info(f"🤖 Sent CA to Sigma Bot: {contract_address[:20]}...")
-            await self.api.log('success', f"🤖 TRADE SENT: {trade.get('token_symbol') or contract_address[:12]}", trade.get('channel_name'), f"CA: {contract_address}")
-            
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send Sigma buy command: {e}")
-            await self.api.log('error', f"Failed to DM Sigma Bot: {e}", trade.get('channel_name'))
-            return False
-    
-    async def process_pending_trades(self):
-        """Loop to process pending trades - sends buy commands to Sigma Bot BEFORE relay."""
-        # Wait for client to be ready
-        while self.running and not self.client:
-            await asyncio.sleep(0.5)
-        
-        # Initialize Sigma Bot connection
-        await self._init_sigma_bot()
-        
-        while self.running:
-            try:
-                trades = await self.api.get_pending_trades()
-                
-                for trade in trades:
-                    try:
-                        trade_id = trade.get('id')
-                        token_symbol = trade.get('token_symbol') or trade.get('contract_address', '')[:12]
-                        
-                        logger.info(f"Processing pending trade: {token_symbol} ({trade_id[:8]}...)")
-                        
-                        # Send buy command to Sigma Bot
-                        success = await self.send_sigma_buy_command(trade)
-                        
-                        if success:
-                            await self.api.mark_trade_sent(trade_id)
-                            logger.info(f"✅ Trade executed: {token_symbol}")
-                        else:
-                            await self.api.mark_trade_failed(trade_id, "Failed to send DM to Sigma Bot")
-                            
-                    except Exception as e:
-                        logger.error(f"Error processing trade {trade.get('id')}: {e}")
-                        await self.api.mark_trade_failed(trade.get('id'), str(e))
-                
-            except Exception as e:
-                logger.error(f"Error in trade processing loop: {e}")
-            
-            await asyncio.sleep(0.3)  # Fast poll for trades
+    # Note: Sigma Bot trading has been removed. All trading is now done via Jupiter direct.
     
     async def send_pending_messages(self):
         """Main loop to send pending messages."""
@@ -1455,20 +1315,21 @@ class DiscordTelegramRelay:
                 self.telegram_sender.start()
             )
             
-            await self.api.log('info', 'Discord to Telegram relay started (real-time mode + trading)')
+            await self.api.log('info', 'Discord to Telegram relay started (real-time mode)')
             
             # Build the list of concurrent tasks
             tasks = [
                 self.discord_watcher.watch_channels(),
                 self.telegram_sender.send_pending_messages(),
-                self.telegram_sender.process_pending_trades(),  # Process trades via Sigma Bot DM
                 self._heartbeat()
             ]
             
-            # Add Solana trader if configured
+            # Add Solana Jupiter trader if configured (all trading via Jupiter direct)
             if self.solana_trader:
                 tasks.append(self.solana_trader.process_pending_trades())
-                logger.info("🚀 Solana direct trading enabled")
+                logger.info("🚀 Solana Jupiter trading enabled")
+            else:
+                logger.warning("⚠️ SOLANA_PRIVATE_KEY not set - trading disabled")
             
             # Run all loops concurrently
             await asyncio.gather(*tasks)
