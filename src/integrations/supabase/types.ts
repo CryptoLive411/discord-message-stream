@@ -238,6 +238,53 @@ export type Database = {
         }
         Relationships: []
       }
+      sell_requests: {
+        Row: {
+          created_at: string
+          error_message: string | null
+          executed_at: string | null
+          id: string
+          percentage: number
+          realized_sol: number | null
+          slippage_bps: number
+          status: string
+          trade_id: string
+          tx_hash: string | null
+        }
+        Insert: {
+          created_at?: string
+          error_message?: string | null
+          executed_at?: string | null
+          id?: string
+          percentage?: number
+          realized_sol?: number | null
+          slippage_bps?: number
+          status?: string
+          trade_id: string
+          tx_hash?: string | null
+        }
+        Update: {
+          created_at?: string
+          error_message?: string | null
+          executed_at?: string | null
+          id?: string
+          percentage?: number
+          realized_sol?: number | null
+          slippage_bps?: number
+          status?: string
+          trade_id?: string
+          tx_hash?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sell_requests_trade_id_fkey"
+            columns: ["trade_id"]
+            isOneToOne: false
+            referencedRelation: "trades"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       system_stats: {
         Row: {
           id: string
