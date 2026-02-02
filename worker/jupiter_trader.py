@@ -20,6 +20,7 @@ Usage:
 
 import asyncio
 import base58
+import base64
 import json
 import logging
 from datetime import datetime, timezone
@@ -30,6 +31,7 @@ import httpx
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.transaction import VersionedTransaction
+from solders import message
 from solana.rpc.async_api import AsyncClient
 from solana.rpc.commitment import Confirmed
 
@@ -313,7 +315,7 @@ class SolanaTrader:
     
     async def execute_swap(self, quote: dict) -> TradeResult:
         """
-        Execute a swap transaction.
+        Execute a swap transaction using Jupiter V6 API.
         
         Args:
             quote: Quote dict from get_quote()
@@ -329,51 +331,64 @@ class SolanaTrader:
             swap_payload = {
                 "quoteResponse": quote,
                 "userPublicKey": self.public_key,
-                "wrapAndUnwrapSol": True,
+                "wrapUnwrapSOL": True,  # Note: wrapUnwrapSOL not wrapAndUnwrapSol
                 "dynamicComputeUnitLimit": True,
                 "prioritizationFeeLamports": "auto",
             }
             
+            logger.info(f"📤 Requesting swap transaction from Jupiter...")
+            
             response = await self.http.post(
                 JUPITER_SWAP_API,
                 json=swap_payload,
-                headers={"Content-Type": "application/json"}
+                headers={"Content-Type": "application/json"},
+                timeout=30.0
             )
-            response.raise_for_status()
+            
+            if response.status_code != 200:
+                error_text = response.text
+                logger.error(f"Jupiter swap API error: {response.status_code} - {error_text}")
+                return TradeResult(success=False, error=f"Jupiter swap API error: {error_text[:100]}")
+            
             swap_result = response.json()
             
             swap_tx = swap_result.get("swapTransaction")
             if not swap_tx:
-                return TradeResult(success=False, error="No swap transaction returned")
+                return TradeResult(success=False, error="No swap transaction returned from Jupiter")
             
-            # Deserialize and sign transaction
-            tx_bytes = base58.b58decode(swap_tx)
-            tx = VersionedTransaction.from_bytes(tx_bytes)
+            # Jupiter returns base64-encoded transaction
+            logger.info(f"📝 Decoding and signing transaction...")
+            raw_transaction = VersionedTransaction.from_bytes(base64.b64decode(swap_tx))
             
-            # Sign with our keypair
-            tx.sign([self.keypair])
+            # Sign the transaction message
+            signature = self.keypair.sign_message(message.to_bytes_versioned(raw_transaction.message))
+            
+            # Create signed transaction
+            signed_txn = VersionedTransaction.populate(raw_transaction.message, [signature])
             
             # Send transaction
+            logger.info(f"📤 Sending transaction to Solana...")
             result = await self.rpc.send_raw_transaction(
-                bytes(tx),
+                bytes(signed_txn),
                 opts={"skip_preflight": True, "max_retries": 3}
             )
             
-            signature = str(result.value)
-            logger.info(f"📤 TX sent: {signature}")
+            tx_signature = str(result.value)
+            logger.info(f"📤 TX sent: {tx_signature}")
             
             # Wait for confirmation with timeout
             try:
                 await asyncio.wait_for(
-                    self.rpc.confirm_transaction(signature, commitment=Confirmed),
+                    self.rpc.confirm_transaction(tx_signature, commitment=Confirmed),
                     timeout=60.0
                 )
+                logger.info(f"✅ TX confirmed: {tx_signature}")
             except asyncio.TimeoutError:
-                logger.warning(f"TX confirmation timeout, but tx was sent: {signature}")
+                logger.warning(f"TX confirmation timeout, but tx was sent: {tx_signature}")
             
             return TradeResult(
                 success=True,
-                signature=signature,
+                signature=tx_signature,
                 expected_output=int(quote.get("outAmount", 0)),
                 tokens_received=int(quote.get("outAmount", 0))
             )
