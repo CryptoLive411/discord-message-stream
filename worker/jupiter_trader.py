@@ -241,35 +241,58 @@ class SolanaTrader:
         input_mint: str,
         output_mint: str,
         amount: int,
-        slippage_bps: int = 100
+        slippage_bps: int = 100,
+        retries: int = 3
     ) -> Optional[dict]:
         """
-        Get a swap quote from Jupiter.
+        Get a swap quote from Jupiter with retry logic.
         
         Args:
             input_mint: Input token mint address
             output_mint: Output token mint address
             amount: Amount in smallest unit (lamports/token base units)
             slippage_bps: Slippage tolerance in basis points (100 = 1%)
+            retries: Number of retry attempts
         
         Returns:
             Quote dict or None if failed
         """
-        try:
-            params = {
-                "inputMint": input_mint,
-                "outputMint": output_mint,
-                "amount": str(amount),
-                "slippageBps": str(slippage_bps),
-            }
-            
-            response = await self.http.get(JUPITER_QUOTE_API, params=params)
-            response.raise_for_status()
-            return response.json()
-            
-        except Exception as e:
-            logger.error(f"Jupiter quote failed: {e}")
-            return None
+        params = {
+            "inputMint": input_mint,
+            "outputMint": output_mint,
+            "amount": str(amount),
+            "slippageBps": str(slippage_bps),
+            "onlyDirectRoutes": "false",
+            "asLegacyTransaction": "false",
+        }
+        
+        for attempt in range(retries):
+            try:
+                response = await self.http.get(JUPITER_QUOTE_API, params=params, timeout=10.0)
+                
+                if response.status_code == 400:
+                    error_data = response.json()
+                    error_msg = error_data.get('error', 'Unknown error')
+                    logger.warning(f"Jupiter quote error: {error_msg}")
+                    # No route found - token might have no liquidity
+                    if 'No route found' in str(error_msg) or 'could not find' in str(error_msg).lower():
+                        logger.error(f"No liquidity for token {output_mint[:8]}...")
+                        return None
+                
+                response.raise_for_status()
+                quote = response.json()
+                
+                if quote and quote.get('outAmount'):
+                    return quote
+                    
+            except Exception as e:
+                logger.warning(f"Jupiter quote attempt {attempt + 1}/{retries} failed: {e}")
+                if attempt < retries - 1:
+                    await asyncio.sleep(1)  # Wait before retry
+                continue
+        
+        logger.error(f"Jupiter quote failed after {retries} attempts")
+        return None
     
     async def get_token_price_sol(self, mint_address: str) -> Optional[float]:
         """Get token price in SOL using Jupiter price API."""
