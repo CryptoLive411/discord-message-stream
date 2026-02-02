@@ -518,6 +518,9 @@ class APIClient:
 class ChannelTab:
     """Manages a single browser tab watching one Discord channel."""
     
+    # Direct Telegram sender reference (set by DiscordWatcher for fast sending)
+    direct_telegram_sender = None
+    
     # JavaScript to inject for real-time message detection
     OBSERVER_SCRIPT = """
     (function() {
@@ -926,12 +929,13 @@ class ChannelTab:
     })();
     """
     
-    def __init__(self, channel: dict, context: BrowserContext, api: APIClient, on_message_callback, get_banned_authors_func):
+    def __init__(self, channel: dict, context: BrowserContext, api: APIClient, on_message_callback, get_banned_authors_func, telegram_sender=None):
         self.channel = channel
         self.context = context
         self.api = api
         self.on_message_callback = on_message_callback
         self.get_banned_authors = get_banned_authors_func    # Function to get current blacklist
+        self.telegram_sender = telegram_sender  # Direct Telegram sender for fast sending
         self.page: Optional[Page] = None
         self.running = False
         self.channel_id = channel['id']
@@ -967,19 +971,38 @@ class ChannelTab:
             
             logger.info(f"[{self.channel_name}] New message from {author}: {raw_text[:50] if raw_text else '[attachment]'}...")
             
-            # Push to queue immediately
-            success = await self.api.push_message(self.channel_id, {
-                'fingerprint': fingerprint,
-                'discord_message_id': msg['message_id'],
-                'author_name': author,
-                'message_text': raw_text,
-                'attachment_urls': msg['attachments']
-            })
-            
-            if success:
-                await self.api.log('success', "Queued message", self.channel_name, f"From: {author} | Content: {raw_text[:80] if raw_text else '[attachment]'}")
-                # Update cursor
-                await self.api.set_channel_cursor(self.channel_id, fingerprint, msg.get('timestamp'))
+            # FAST PATH: Send directly to Telegram (bypass queue)
+            if self.telegram_sender and self.telegram_sender.running:
+                try:
+                    await self.telegram_sender.send_direct(
+                        text=raw_text,
+                        channel_name=self.channel_name,
+                        channel_id=self.channel_id,
+                        attachments=msg.get('attachments', [])
+                    )
+                    logger.info(f"[{self.channel_name}] ⚡ FAST sent to Telegram")
+                except Exception as e:
+                    logger.error(f"[{self.channel_name}] Fast send failed, falling back to queue: {e}")
+                    # Fallback to queue on error
+                    await self.api.push_message(self.channel_id, {
+                        'fingerprint': fingerprint,
+                        'discord_message_id': msg['message_id'],
+                        'author_name': author,
+                        'message_text': raw_text,
+                        'attachment_urls': msg['attachments']
+                    })
+            else:
+                # Fallback: Push to queue (slower path)
+                success = await self.api.push_message(self.channel_id, {
+                    'fingerprint': fingerprint,
+                    'discord_message_id': msg['message_id'],
+                    'author_name': author,
+                    'message_text': raw_text,
+                    'attachment_urls': msg['attachments']
+                })
+                
+                if success:
+                    await self.api.log('success', "Queued message", self.channel_name, f"From: {author} | Content: {raw_text[:80] if raw_text else '[attachment]'}")
             
             # Notify main relay
             if self.on_message_callback:
@@ -1086,9 +1109,10 @@ class ChannelTab:
 class DiscordWatcher:
     """Watches Discord channels using parallel tabs with MutationObserver."""
     
-    def __init__(self, config: Config, api: APIClient):
+    def __init__(self, config: Config, api: APIClient, telegram_sender=None):
         self.config = config
         self.api = api
+        self.telegram_sender = telegram_sender  # Direct Telegram sender for fast path
         self.context: Optional[BrowserContext] = None
         self.tabs: dict[str, ChannelTab] = {}  # channel_id -> ChannelTab
         self.running = False
@@ -1162,7 +1186,7 @@ class DiscordWatcher:
         new_channels = [(cid, channel) for cid, channel in enabled_channels.items() if cid not in self.tabs]
         for i, (cid, channel) in enumerate(new_channels):
             logger.info(f"Opening tab for new channel: {channel['name']}")
-            tab = ChannelTab(channel, self.context, self.api, self._on_message, self._get_banned_authors)
+            tab = ChannelTab(channel, self.context, self.api, self._on_message, self._get_banned_authors, self.telegram_sender)
             self.tabs[cid] = tab
             # Start tab in background with staggered delay
             asyncio.create_task(self._start_tab_with_delay(tab, i * 0.5))
@@ -1298,6 +1322,49 @@ class TelegramSender:
             logger.error(f"Failed to resolve Telegram destination: {e}")
             return None
     
+    async def send_direct(self, text: str, channel_name: str, channel_id: str, attachments: list = None):
+        """Send a message directly to Telegram (fast path, no queue)."""
+        if not self.running or not self.client:
+            raise Exception("Telegram sender not running")
+        
+        # Get or cache destination
+        if not self.destination:
+            self.destination = await self._get_destination()
+        
+        if not self.destination:
+            raise Exception("No Telegram destination configured")
+        
+        dest = self.destination
+        
+        # Get topic ID for this channel if using topics
+        reply_to = None
+        if dest['use_topics']:
+            channels = await self.api.get_channels()
+            channel = next((c for c in channels if c['id'] == channel_id), None)
+            if channel and channel.get('telegram_topic_id'):
+                reply_to = int(channel['telegram_topic_id'])
+        
+        # Send text message
+        if text and text.strip():
+            await self.client.send_message(
+                dest['entity'],
+                text.strip(),
+                reply_to=reply_to,
+                parse_mode=None
+            )
+        
+        # Send attachments
+        if attachments:
+            for url in attachments[:3]:  # Limit to 3 for speed
+                try:
+                    await self.client.send_file(
+                        dest['entity'],
+                        url,
+                        reply_to=reply_to
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to send attachment: {e}")
+    
     async def _format_message(self, msg: dict, channel_name: str) -> str:
         """Format a message for Telegram - text only, no username."""
         return (msg.get('message_text') or '').strip()
@@ -1400,8 +1467,9 @@ class DiscordTelegramRelay:
     def __init__(self):
         self.config = Config.from_env()
         self.api = APIClient(self.config)
-        self.discord_watcher = DiscordWatcher(self.config, self.api)
         self.telegram_sender = TelegramSender(self.config, self.api)
+        # Pass telegram_sender to DiscordWatcher for direct fast sending
+        self.discord_watcher = DiscordWatcher(self.config, self.api, self.telegram_sender)
         self.solana_trader = None  # Optional Solana trading module
         self.running = False
         
