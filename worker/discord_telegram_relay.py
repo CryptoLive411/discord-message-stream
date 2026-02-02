@@ -963,7 +963,10 @@ class ChannelTab:
         self.telegram_sender = telegram_sender  # Direct Telegram sender for fast sending
         self.page: Optional[Page] = None
         self.running = False
-        self.channel_id = channel['id']
+        # Extract Discord channel ID from URL (last segment)
+        # URL format: https://discord.com/channels/SERVER_ID/CHANNEL_ID
+        url_parts = channel['url'].rstrip('/').split('/')
+        self.channel_id = url_parts[-1] if url_parts else channel['id']
         self.channel_name = channel['name']
         self.channel_url = channel['url']
     
