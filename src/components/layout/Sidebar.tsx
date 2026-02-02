@@ -12,13 +12,11 @@ import {
   ChevronLeft,
   ChevronRight,
   Zap,
-  TrendingUp,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 const navItems = [
   { icon: LayoutDashboard, label: 'Dashboard', path: '/' },
-  { icon: TrendingUp, label: 'Trading', path: '/trading' },
   { icon: Hash, label: 'Channels', path: '/channels' },
   { icon: ScrollText, label: 'Logs', path: '/logs' },
   { icon: Activity, label: 'Health', path: '/health' },

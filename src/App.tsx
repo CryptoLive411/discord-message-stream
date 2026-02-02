@@ -8,7 +8,6 @@ import Channels from "./pages/Channels";
 import Logs from "./pages/Logs";
 import Health from "./pages/Health";
 import Settings from "./pages/Settings";
-import Trading from "./pages/Trading";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -21,7 +20,6 @@ const App = () => (
       <BrowserRouter>
         <Routes>
           <Route path="/" element={<Dashboard />} />
-          <Route path="/trading" element={<Trading />} />
           <Route path="/channels" element={<Channels />} />
           <Route path="/logs" element={<Logs />} />
           <Route path="/health" element={<Health />} />
