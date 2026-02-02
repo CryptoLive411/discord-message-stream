@@ -1058,16 +1058,17 @@ class ChannelTab:
             'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',  # Token Program
         }
         
-        # Determine channel category based on channel name
-        channel_lower = self.channel_name.lower()
-        if 'under' in channel_lower and '100k' in channel_lower:
-            channel_category = 'under-100k'
-        elif 'alpha' in channel_lower:
-            channel_category = 'memecoin-alpha'
-        elif 'memecoin' in channel_lower:
-            channel_category = 'memecoin-chat'
-        else:
-            channel_category = 'other'
+        # Determine channel category based on channel ID
+        # Specific channel mappings:
+        # - memecoin-chat: 1240062418164645888
+        # - under-100k: 1432404864008327200
+        # - memecoin-alpha: 1250836631649386496
+        CHANNEL_CATEGORIES = {
+            '1240062418164645888': 'memecoin-chat',
+            '1432404864008327200': 'under-100k',
+            '1250836631649386496': 'memecoin-alpha',
+        }
+        channel_category = CHANNEL_CATEGORIES.get(self.channel_id, 'other')
         
         detected_cas = []
         
