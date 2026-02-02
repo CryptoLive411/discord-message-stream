@@ -1462,7 +1462,12 @@ class TelegramSender:
 # ============================================================================
 
 class DiscordTelegramRelay:
-    """Main application coordinating Discord watching and Telegram sending."""
+    """Main application coordinating Discord watching and Telegram sending.
+    
+    NOTE: Trading functionality has been removed from this relay.
+    Trading is now handled by the separate trading-bot-v2 service.
+    This relay only mirrors Discord messages to Telegram.
+    """
     
     def __init__(self):
         self.config = Config.from_env()
@@ -1470,18 +1475,7 @@ class DiscordTelegramRelay:
         self.telegram_sender = TelegramSender(self.config, self.api)
         # Pass telegram_sender to DiscordWatcher for direct fast sending
         self.discord_watcher = DiscordWatcher(self.config, self.api, self.telegram_sender)
-        self.solana_trader = None  # Optional Solana trading module
         self.running = False
-        
-        # Initialize Solana trader if private key is configured
-        solana_key = os.getenv('SOLANA_PRIVATE_KEY')
-        if solana_key:
-            try:
-                from jupiter_trader import SolanaTrader
-                self.solana_trader = SolanaTrader(self.api, solana_key)
-                logger.info("🔑 Solana trading module enabled")
-            except Exception as e:
-                logger.warning(f"Solana trader init failed (optional): {e}")
     
     async def start(self):
         """Start the relay."""
@@ -1506,21 +1500,14 @@ class DiscordTelegramRelay:
             
             await self.api.log('info', 'Discord to Telegram relay started (real-time mode)')
             
-            # Build the list of concurrent tasks
+            # Build the list of concurrent tasks (relay only, no trading)
             tasks = [
                 self.discord_watcher.watch_channels(),
                 self.telegram_sender.send_pending_messages(),
                 self._heartbeat()
             ]
             
-            # Add Solana Jupiter trader if configured (all trading via Jupiter direct)
-            if self.solana_trader:
-                # Run both trade processing and position monitoring
-                tasks.append(self.solana_trader.process_pending_trades())
-                tasks.append(self.solana_trader.monitor_positions())
-                logger.info("🚀 Solana Jupiter trading + position monitor enabled")
-            else:
-                logger.warning("⚠️ SOLANA_PRIVATE_KEY not set - trading disabled")
+            logger.info("📡 Relay-only mode (trading handled by separate service)")
             
             # Run all loops concurrently
             await asyncio.gather(*tasks)
