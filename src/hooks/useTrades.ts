@@ -27,14 +27,14 @@ export interface Trade {
   retry_count: number;
   created_at: string;
   updated_at: string;
-  // Auto-sell strategy fields
-  auto_sell_enabled: boolean;
-  trailing_stop_enabled: boolean;
-  trailing_stop_pct: number | null;
-  highest_price: number | null;
-  time_based_sell_at: string | null;
-  auto_sell_reason: string | null;
-  priority: string;
+  // Optional auto-sell strategy fields (not yet in DB)
+  auto_sell_enabled?: boolean;
+  trailing_stop_enabled?: boolean;
+  trailing_stop_pct?: number | null;
+  highest_price?: number | null;
+  time_based_sell_at?: string | null;
+  auto_sell_reason?: string | null;
+  priority?: string;
 }
 
 export interface TradePosition extends Trade {
@@ -55,13 +55,13 @@ export interface TradingConfig {
   notes: string | null;
   created_at: string;
   updated_at: string;
-  // Auto-sell strategy fields
-  auto_sell_enabled: boolean;
-  trailing_stop_enabled: boolean;
-  trailing_stop_pct: number | null;
-  time_based_sell_enabled: boolean;
-  time_based_sell_minutes: number | null;
-  priority: 'high' | 'medium' | 'low';
+  // Optional auto-sell strategy fields (not yet in DB)
+  auto_sell_enabled?: boolean;
+  trailing_stop_enabled?: boolean;
+  trailing_stop_pct?: number | null;
+  time_based_sell_enabled?: boolean;
+  time_based_sell_minutes?: number | null;
+  priority?: 'high' | 'medium' | 'low';
 }
 
 // Fetch all trades
