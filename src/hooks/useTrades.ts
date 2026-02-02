@@ -61,7 +61,7 @@ export interface TradingConfig {
   trailing_stop_pct?: number | null;
   time_based_sell_enabled?: boolean;
   time_based_sell_minutes?: number | null;
-  priority?: 'high' | 'medium' | 'low';
+  priority?: string;
 }
 
 // Fetch all trades

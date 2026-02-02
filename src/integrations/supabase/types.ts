@@ -361,6 +361,8 @@ export type Database = {
         Row: {
           allocation_sol: number
           author_name: string | null
+          auto_sell_enabled: boolean
+          auto_sell_reason: string | null
           buy_tx_hash: string | null
           chain: string
           channel_id: string | null
@@ -370,8 +372,10 @@ export type Database = {
           current_price: number | null
           entry_price: number | null
           error_message: string | null
+          highest_price: number | null
           id: string
           message_fingerprint: string | null
+          priority: string
           realized_pnl_sol: number | null
           retry_count: number
           sell_tx_hash: string | null
@@ -381,12 +385,17 @@ export type Database = {
           stop_loss_pct: number
           take_profit_1_pct: number
           take_profit_2_pct: number
+          time_based_sell_at: string | null
           token_symbol: string | null
+          trailing_stop_enabled: boolean
+          trailing_stop_pct: number | null
           updated_at: string
         }
         Insert: {
           allocation_sol: number
           author_name?: string | null
+          auto_sell_enabled?: boolean
+          auto_sell_reason?: string | null
           buy_tx_hash?: string | null
           chain?: string
           channel_id?: string | null
@@ -396,8 +405,10 @@ export type Database = {
           current_price?: number | null
           entry_price?: number | null
           error_message?: string | null
+          highest_price?: number | null
           id?: string
           message_fingerprint?: string | null
+          priority?: string
           realized_pnl_sol?: number | null
           retry_count?: number
           sell_tx_hash?: string | null
@@ -407,12 +418,17 @@ export type Database = {
           stop_loss_pct?: number
           take_profit_1_pct?: number
           take_profit_2_pct?: number
+          time_based_sell_at?: string | null
           token_symbol?: string | null
+          trailing_stop_enabled?: boolean
+          trailing_stop_pct?: number | null
           updated_at?: string
         }
         Update: {
           allocation_sol?: number
           author_name?: string | null
+          auto_sell_enabled?: boolean
+          auto_sell_reason?: string | null
           buy_tx_hash?: string | null
           chain?: string
           channel_id?: string | null
@@ -422,8 +438,10 @@ export type Database = {
           current_price?: number | null
           entry_price?: number | null
           error_message?: string | null
+          highest_price?: number | null
           id?: string
           message_fingerprint?: string | null
+          priority?: string
           realized_pnl_sol?: number | null
           retry_count?: number
           sell_tx_hash?: string | null
@@ -433,7 +451,10 @@ export type Database = {
           stop_loss_pct?: number
           take_profit_1_pct?: number
           take_profit_2_pct?: number
+          time_based_sell_at?: string | null
           token_symbol?: string | null
+          trailing_stop_enabled?: boolean
+          trailing_stop_pct?: number | null
           updated_at?: string
         }
         Relationships: [
@@ -449,38 +470,56 @@ export type Database = {
       trading_config: {
         Row: {
           allocation_sol: number
+          auto_sell_enabled: boolean
           channel_pattern: string
           created_at: string
           enabled: boolean
           id: string
           notes: string | null
+          priority: string
           stop_loss_pct: number
           take_profit_1_pct: number
           take_profit_2_pct: number
+          time_based_sell_enabled: boolean
+          time_based_sell_minutes: number | null
+          trailing_stop_enabled: boolean
+          trailing_stop_pct: number | null
           updated_at: string
         }
         Insert: {
           allocation_sol?: number
+          auto_sell_enabled?: boolean
           channel_pattern: string
           created_at?: string
           enabled?: boolean
           id?: string
           notes?: string | null
+          priority?: string
           stop_loss_pct?: number
           take_profit_1_pct?: number
           take_profit_2_pct?: number
+          time_based_sell_enabled?: boolean
+          time_based_sell_minutes?: number | null
+          trailing_stop_enabled?: boolean
+          trailing_stop_pct?: number | null
           updated_at?: string
         }
         Update: {
           allocation_sol?: number
+          auto_sell_enabled?: boolean
           channel_pattern?: string
           created_at?: string
           enabled?: boolean
           id?: string
           notes?: string | null
+          priority?: string
           stop_loss_pct?: number
           take_profit_1_pct?: number
           take_profit_2_pct?: number
+          time_based_sell_enabled?: boolean
+          time_based_sell_minutes?: number | null
+          trailing_stop_enabled?: boolean
+          trailing_stop_pct?: number | null
           updated_at?: string
         }
         Relationships: []
