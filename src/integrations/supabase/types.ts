@@ -365,6 +365,7 @@ export type Database = {
           auto_sell_reason: string | null
           buy_tx_hash: string | null
           chain: string
+          channel_category: string | null
           channel_id: string | null
           channel_name: string
           contract_address: string
@@ -375,12 +376,14 @@ export type Database = {
           highest_price: number | null
           id: string
           message_fingerprint: string | null
+          message_preview: string | null
           priority: string
           realized_pnl_sol: number | null
           retry_count: number
           sell_tx_hash: string | null
           sigma_buy_sent_at: string | null
           sigma_sell_sent_at: string | null
+          source_author: string | null
           status: string
           stop_loss_pct: number
           take_profit_1_pct: number
@@ -398,6 +401,7 @@ export type Database = {
           auto_sell_reason?: string | null
           buy_tx_hash?: string | null
           chain?: string
+          channel_category?: string | null
           channel_id?: string | null
           channel_name: string
           contract_address: string
@@ -408,12 +412,14 @@ export type Database = {
           highest_price?: number | null
           id?: string
           message_fingerprint?: string | null
+          message_preview?: string | null
           priority?: string
           realized_pnl_sol?: number | null
           retry_count?: number
           sell_tx_hash?: string | null
           sigma_buy_sent_at?: string | null
           sigma_sell_sent_at?: string | null
+          source_author?: string | null
           status?: string
           stop_loss_pct?: number
           take_profit_1_pct?: number
@@ -431,6 +437,7 @@ export type Database = {
           auto_sell_reason?: string | null
           buy_tx_hash?: string | null
           chain?: string
+          channel_category?: string | null
           channel_id?: string | null
           channel_name?: string
           contract_address?: string
@@ -441,12 +448,14 @@ export type Database = {
           highest_price?: number | null
           id?: string
           message_fingerprint?: string | null
+          message_preview?: string | null
           priority?: string
           realized_pnl_sol?: number | null
           retry_count?: number
           sell_tx_hash?: string | null
           sigma_buy_sent_at?: string | null
           sigma_sell_sent_at?: string | null
+          source_author?: string | null
           status?: string
           stop_loss_pct?: number
           take_profit_1_pct?: number

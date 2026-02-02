@@ -688,8 +688,9 @@ Deno.serve(async (req) => {
 
         if (error) throw error;
 
-        // Group by category
-        const grouped = {
+        // Group by category with proper typing
+        type TradeRecord = typeof trades extends Array<infer T> ? T : never;
+        const grouped: Record<string, TradeRecord[]> = {
           "under-100k": [],
           "memecoin-chat": [],
           "memecoin-alpha": [],
