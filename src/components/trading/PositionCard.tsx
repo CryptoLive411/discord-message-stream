@@ -3,6 +3,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Slider } from '@/components/ui/slider';
+import { Switch } from '@/components/ui/switch';
 import { 
   ExternalLink, 
   TrendingUp, 
@@ -10,9 +11,12 @@ import {
   Loader2,
   Copy,
   Check,
+  Shield,
+  Clock,
+  TrendingDown as TrailingIcon,
 } from 'lucide-react';
 import { StatusBadge } from './StatusBadge';
-import { Trade, useExecuteSell } from '@/hooks/useTrades';
+import { Trade, useExecuteSell, useUpdateTrade } from '@/hooks/useTrades';
 import { toast } from 'sonner';
 
 interface PositionCardProps {
@@ -23,6 +27,27 @@ export function PositionCard({ trade }: PositionCardProps) {
   const [sellPercentage, setSellPercentage] = useState(100);
   const [copied, setCopied] = useState(false);
   const executeSell = useExecuteSell();
+  const updateTrade = useUpdateTrade();
+
+  // Auto-sell settings from trade
+  const autoSellEnabled = (trade as any).auto_sell_enabled ?? true;
+  const trailingStopEnabled = (trade as any).trailing_stop_enabled ?? false;
+  const highestPrice = (trade as any).highest_price;
+  const timeSellAt = (trade as any).time_based_sell_at;
+
+  const handleToggleAutoSell = () => {
+    updateTrade.mutate({
+      id: trade.id,
+      auto_sell_enabled: !autoSellEnabled,
+    });
+  };
+
+  const handleToggleTrailingStop = () => {
+    updateTrade.mutate({
+      id: trade.id,
+      trailing_stop_enabled: !trailingStopEnabled,
+    });
+  };
 
   const handleCopy = async () => {
     await navigator.clipboard.writeText(trade.contract_address);
@@ -101,6 +126,49 @@ export function PositionCard({ trade }: PositionCardProps) {
             <p className="font-mono text-green-400">+{trade.take_profit_1_pct}%</p>
           </div>
         </div>
+
+        {/* Auto-Sell Controls */}
+        {(trade.status === 'bought' || trade.status === 'partial_tp1') && (
+          <div className="space-y-2 mb-4 p-2 rounded bg-muted/20 border border-border/30">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Shield className="w-3.5 h-3.5 text-blue-400" />
+                <span className="text-xs font-medium">Auto-Sell</span>
+              </div>
+              <Switch
+                checked={autoSellEnabled}
+                onCheckedChange={handleToggleAutoSell}
+                disabled={updateTrade.isPending}
+              />
+            </div>
+            
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <TrailingIcon className="w-3.5 h-3.5 text-yellow-400" />
+                <span className="text-xs font-medium">Trailing Stop</span>
+              </div>
+              <Switch
+                checked={trailingStopEnabled}
+                onCheckedChange={handleToggleTrailingStop}
+                disabled={updateTrade.isPending || !autoSellEnabled}
+              />
+            </div>
+
+            {highestPrice && (
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-muted-foreground">Highest Price</span>
+                <span className="font-mono text-green-400">{Number(highestPrice).toExponential(2)}</span>
+              </div>
+            )}
+
+            {timeSellAt && (
+              <div className="flex items-center gap-1 text-xs text-orange-400">
+                <Clock className="w-3 h-3" />
+                <span>Auto-sell at {new Date(timeSellAt).toLocaleTimeString()}</span>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* TX Hash */}
         {hasTxHash ? (

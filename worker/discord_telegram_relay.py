@@ -299,18 +299,22 @@ class APIClient:
             logger.error(f"Failed to fetch open positions: {e}")
             return []
     
-    async def update_position_price(self, trade_id: str, current_price: float, current_value_sol: float = None) -> Optional[dict]:
-        """Update position price and check for auto-sell triggers."""
+    async def update_position_price(self, trade_id: str, current_price: float, current_value_sol: float = None, highest_price: float = None) -> Optional[dict]:
+        """Update position price, highest price for trailing stop, and check for auto-sell triggers."""
         try:
+            payload = {
+                "trade_id": trade_id,
+                "current_price": current_price,
+                "current_value_sol": current_value_sol
+            }
+            if highest_price is not None:
+                payload["highest_price"] = highest_price
+                
             response = await self.client.post(
                 f"{self.base_url}/worker-pull",
                 params={"action": "update_position_price"},
                 headers=self.headers,
-                json={
-                    "trade_id": trade_id,
-                    "current_price": current_price,
-                    "current_value_sol": current_value_sol
-                }
+                json=payload
             )
             response.raise_for_status()
             return response.json()

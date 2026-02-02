@@ -5,6 +5,12 @@ Jupiter Solana Trader Module
 Executes SOL <-> Token swaps via Jupiter Aggregator V6 API.
 Includes Position Manager for auto-sell based on TP/SL thresholds.
 
+Features:
+- Channel-based allocation (memecoin-alpha: high, memecoin-chat/under-100k: low)
+- Auto-sell with trailing stop loss
+- Time-based auto-sell for volatile channels
+- Stop loss and take profit triggers
+
 Usage:
     from jupiter_trader import SolanaTrader
     
@@ -16,8 +22,9 @@ import asyncio
 import base58
 import json
 import logging
-from typing import Optional
-from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Optional, Dict, Any
+from dataclasses import dataclass, field
 
 import httpx
 from solders.keypair import Keypair
@@ -46,7 +53,44 @@ RPC_ENDPOINTS = [
 ]
 
 # Position monitoring interval
-POSITION_CHECK_INTERVAL = 10  # seconds
+POSITION_CHECK_INTERVAL = 5  # seconds - faster for volatile tokens
+
+# Channel priority configurations
+CHANNEL_CONFIGS = {
+    'memecoin-alpha': {
+        'priority': 'high',
+        'allocation_sol': 0.5,
+        'stop_loss_pct': -25.0,
+        'take_profit_1_pct': 100.0,
+        'take_profit_2_pct': 200.0,
+        'trailing_stop_enabled': True,
+        'trailing_stop_pct': 15.0,
+        'time_based_sell_enabled': False,
+        'time_based_sell_minutes': None,
+    },
+    'memecoin-chat': {
+        'priority': 'low',
+        'allocation_sol': 0.1,
+        'stop_loss_pct': -15.0,
+        'take_profit_1_pct': 50.0,
+        'take_profit_2_pct': 100.0,
+        'trailing_stop_enabled': True,
+        'trailing_stop_pct': 10.0,
+        'time_based_sell_enabled': True,
+        'time_based_sell_minutes': 30,
+    },
+    'under-100k': {
+        'priority': 'low',
+        'allocation_sol': 0.1,
+        'stop_loss_pct': -20.0,
+        'take_profit_1_pct': 75.0,
+        'take_profit_2_pct': 150.0,
+        'trailing_stop_enabled': True,
+        'trailing_stop_pct': 12.0,
+        'time_based_sell_enabled': True,
+        'time_based_sell_minutes': 45,
+    },
+}
 
 # ============================================================================
 # Trade Result
@@ -60,6 +104,33 @@ class TradeResult:
     error: Optional[str] = None
     expected_output: Optional[float] = None
     tokens_received: Optional[int] = None
+
+
+@dataclass
+class ChannelConfig:
+    """Trading configuration for a specific channel."""
+    priority: str = 'medium'
+    allocation_sol: float = 0.25
+    stop_loss_pct: float = -30.0
+    take_profit_1_pct: float = 100.0
+    take_profit_2_pct: float = 200.0
+    trailing_stop_enabled: bool = False
+    trailing_stop_pct: float = 15.0
+    time_based_sell_enabled: bool = False
+    time_based_sell_minutes: Optional[int] = None
+    auto_sell_enabled: bool = True
+
+
+def get_channel_config(channel_name: str) -> ChannelConfig:
+    """Get trading config for a channel, matching by pattern."""
+    channel_lower = channel_name.lower()
+    
+    for pattern, config in CHANNEL_CONFIGS.items():
+        if pattern in channel_lower:
+            return ChannelConfig(**config)
+    
+    # Default config for unknown channels
+    return ChannelConfig()
 
 # ============================================================================
 # Solana Trader
@@ -482,9 +553,14 @@ class SolanaTrader:
         """
         Monitor open positions and trigger auto-sells based on TP/SL.
         
+        Enhanced with:
+        - Trailing stop loss
+        - Time-based auto-sell for volatile channels
+        - Channel-specific strategies
+        
         This runs as a separate loop alongside trade processing.
         """
-        logger.info("📊 Starting position monitor...")
+        logger.info("📊 Starting enhanced position monitor...")
         
         while self.running:
             try:
@@ -495,9 +571,22 @@ class SolanaTrader:
                     contract_address = pos.get('contract_address')
                     entry_price = pos.get('entry_price')
                     status = pos.get('status')
+                    channel_name = pos.get('channel_name', '')
+                    created_at = pos.get('created_at')
+                    highest_price = pos.get('highest_price')
+                    auto_sell_enabled = pos.get('auto_sell_enabled', True)
+                    trailing_stop_enabled = pos.get('trailing_stop_enabled', False)
+                    trailing_stop_pct = pos.get('trailing_stop_pct', 15.0)
+                    time_based_sell_at = pos.get('time_based_sell_at')
                     
                     if not contract_address or not entry_price:
                         continue
+                    
+                    if not auto_sell_enabled:
+                        continue
+                    
+                    # Get channel config for strategy parameters
+                    config = get_channel_config(channel_name)
                     
                     # Get current token price
                     current_price = await self.get_token_price_sol(contract_address)
@@ -515,25 +604,84 @@ class SolanaTrader:
                     if current_price is None:
                         continue
                     
-                    # Update price and check for triggers
+                    # Calculate PnL percentage
+                    pnl_pct = ((current_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
+                    
+                    # Update highest price for trailing stop
+                    new_highest = highest_price
+                    if highest_price is None or current_price > highest_price:
+                        new_highest = current_price
+                    
+                    # Check for auto-sell triggers
+                    action_needed = None
+                    sell_percentage = 100
+                    reason = None
+                    
+                    # 1. Check STOP LOSS
+                    stop_loss_pct = pos.get('stop_loss_pct', config.stop_loss_pct)
+                    if pnl_pct <= stop_loss_pct:
+                        action_needed = 'stop_loss'
+                        reason = f"Stop loss hit at {pnl_pct:.1f}%"
+                        sell_percentage = 100
+                        logger.warning(f"🛑 STOP LOSS for {contract_address[:8]}... PnL: {pnl_pct:.1f}%")
+                    
+                    # 2. Check TRAILING STOP (only if in profit and trailing enabled)
+                    elif trailing_stop_enabled and new_highest and pnl_pct > 0:
+                        trailing_pct = trailing_stop_pct or config.trailing_stop_pct
+                        drop_from_high = ((new_highest - current_price) / new_highest) * 100 if new_highest > 0 else 0
+                        
+                        if drop_from_high >= trailing_pct:
+                            action_needed = 'trailing_stop'
+                            reason = f"Trailing stop: dropped {drop_from_high:.1f}% from high"
+                            sell_percentage = 100
+                            logger.warning(f"📉 TRAILING STOP for {contract_address[:8]}... dropped {drop_from_high:.1f}% from high")
+                    
+                    # 3. Check TAKE PROFIT 1 (sell 50%)
+                    elif status == 'bought':
+                        tp1_pct = pos.get('take_profit_1_pct', config.take_profit_1_pct)
+                        if pnl_pct >= tp1_pct:
+                            action_needed = 'take_profit_1'
+                            reason = f"TP1 hit at {pnl_pct:.1f}%"
+                            sell_percentage = 50
+                            logger.info(f"🎯 TP1 for {contract_address[:8]}... PnL: {pnl_pct:.1f}%")
+                    
+                    # 4. Check TAKE PROFIT 2 (sell remaining)
+                    elif status == 'partial_tp1':
+                        tp2_pct = pos.get('take_profit_2_pct', config.take_profit_2_pct)
+                        if pnl_pct >= tp2_pct:
+                            action_needed = 'take_profit_2'
+                            reason = f"TP2 hit at {pnl_pct:.1f}%"
+                            sell_percentage = 100
+                            logger.info(f"🎯🎯 TP2 for {contract_address[:8]}... PnL: {pnl_pct:.1f}%")
+                    
+                    # 5. Check TIME-BASED SELL (for volatile channels)
+                    if not action_needed and time_based_sell_at:
+                        try:
+                            sell_time = datetime.fromisoformat(time_based_sell_at.replace('Z', '+00:00'))
+                            if datetime.now(timezone.utc) >= sell_time:
+                                action_needed = 'time_based'
+                                reason = f"Time-based auto-sell triggered"
+                                sell_percentage = 100
+                                logger.info(f"⏰ TIME-BASED SELL for {contract_address[:8]}...")
+                        except Exception as e:
+                            logger.debug(f"Error parsing time_based_sell_at: {e}")
+                    
+                    # Update position price and highest price
                     result = await self.api.update_position_price(
                         trade_id,
                         current_price=current_price,
-                        current_value_sol=None  # Could calculate if needed
+                        current_value_sol=None,
+                        highest_price=new_highest
                     )
                     
-                    if result and result.get('action_needed'):
-                        action = result['action_needed']
-                        sell_pct = result.get('sell_percentage', 100)
-                        pnl = result.get('pnl_pct', 0)
+                    # Execute auto-sell if triggered
+                    if action_needed:
+                        logger.info(f"🔔 {action_needed.upper()} triggered for {contract_address[:8]}... (PnL: {pnl_pct:.1f}%)")
                         
-                        logger.info(f"🔔 {action.upper()} triggered for {contract_address[:8]}... (PnL: {pnl:.1f}%)")
-                        
-                        # Trigger auto-sell
                         await self.api.trigger_auto_sell(
                             trade_id,
-                            percentage=sell_pct,
-                            reason=f"{action} at {pnl:.1f}%"
+                            percentage=sell_percentage,
+                            reason=reason
                         )
                 
                 await asyncio.sleep(POSITION_CHECK_INTERVAL)

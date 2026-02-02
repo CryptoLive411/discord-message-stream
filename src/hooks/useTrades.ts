@@ -27,6 +27,14 @@ export interface Trade {
   retry_count: number;
   created_at: string;
   updated_at: string;
+  // Auto-sell strategy fields
+  auto_sell_enabled: boolean;
+  trailing_stop_enabled: boolean;
+  trailing_stop_pct: number | null;
+  highest_price: number | null;
+  time_based_sell_at: string | null;
+  auto_sell_reason: string | null;
+  priority: string;
 }
 
 export interface TradePosition extends Trade {
@@ -47,6 +55,13 @@ export interface TradingConfig {
   notes: string | null;
   created_at: string;
   updated_at: string;
+  // Auto-sell strategy fields
+  auto_sell_enabled: boolean;
+  trailing_stop_enabled: boolean;
+  trailing_stop_pct: number | null;
+  time_based_sell_enabled: boolean;
+  time_based_sell_minutes: number | null;
+  priority: 'high' | 'medium' | 'low';
 }
 
 // Fetch all trades
@@ -326,6 +341,34 @@ export function useDeleteTrade() {
     },
     onError: (error) => {
       toast.error(`Failed to delete trade: ${error.message}`);
+    },
+  });
+}
+
+// Update a trade record (for auto-sell toggles, etc.)
+export function useUpdateTrade() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (updates: Partial<Trade> & { id: string }) => {
+      const { id, ...data } = updates;
+      const { error } = await supabase
+        .from('trades')
+        .update({
+          ...data,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', id);
+
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['trades'] });
+      queryClient.invalidateQueries({ queryKey: ['openPositions'] });
+      toast.success('Trade updated');
+    },
+    onError: (error) => {
+      toast.error(`Failed to update trade: ${error.message}`);
     },
   });
 }
