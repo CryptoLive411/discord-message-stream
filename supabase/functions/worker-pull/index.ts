@@ -611,6 +611,106 @@ Deno.serve(async (req) => {
         );
       }
 
+      case "queue_trade_ca": {
+        // Queue a detected CA for trading (from Discord relay)
+        // Categories: under-100k, memecoin-chat, memecoin-alpha, other
+        const body = await req.json();
+        const { token_address, chain, channel_id, channel_name, channel_category, author, message_preview } = body;
+
+        // Check for duplicate (same token in last 5 minutes)
+        const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+        const { data: existing } = await supabase
+          .from("trades")
+          .select("id")
+          .eq("contract_address", token_address)
+          .gte("created_at", fiveMinutesAgo)
+          .maybeSingle();
+
+        if (existing) {
+          return new Response(
+            JSON.stringify({ success: false, error: "Duplicate CA (already queued)" }),
+            { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // Get trading config for this channel category
+        const { data: config } = await supabase
+          .from("trading_config")
+          .select("*")
+          .eq("channel_pattern", channel_category)
+          .maybeSingle();
+
+        const allocationSol = config?.allocation_sol || 0.1;
+
+        // Insert trade with pending status
+        const { data: trade, error } = await supabase
+          .from("trades")
+          .insert({
+            contract_address: token_address,
+            chain: chain,
+            channel_id: channel_id,
+            channel_name: channel_name,
+            channel_category: channel_category,
+            allocation_sol: allocationSol,
+            status: "pending_sigma",
+            source_author: author,
+            message_preview: message_preview,
+          })
+          .select()
+          .single();
+
+        if (error) throw error;
+
+        // Log the detection
+        await supabase.from("relay_logs").insert({
+          level: "info",
+          message: `🎯 CA DETECTED [${channel_category}]: ${token_address.slice(0, 15)}...`,
+          signal_type: "ca_detected",
+          channel_name: channel_name,
+          details: `Chain: ${chain}, Author: ${author}`,
+          metadata: { token_address, chain, channel_category, trade_id: trade.id },
+        });
+
+        return new Response(
+          JSON.stringify({ success: true, trade_id: trade.id }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      case "get_pending_trades_by_category": {
+        // Get pending trades grouped by channel category for the trading bot
+        const { data: trades, error } = await supabase
+          .from("trades")
+          .select("*")
+          .eq("status", "pending_sigma")
+          .order("created_at")
+          .limit(50);
+
+        if (error) throw error;
+
+        // Group by category
+        const grouped = {
+          "under-100k": [],
+          "memecoin-chat": [],
+          "memecoin-alpha": [],
+          "other": [],
+        };
+
+        for (const trade of trades || []) {
+          const cat = trade.channel_category || "other";
+          if (grouped[cat]) {
+            grouped[cat].push(trade);
+          } else {
+            grouped["other"].push(trade);
+          }
+        }
+
+        return new Response(
+          JSON.stringify({ trades: grouped }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
       default:
         return new Response(
           JSON.stringify({ error: "Unknown action. Use: get_channels, get_pending_messages, get_telegram_config, get_stats, get_connection_status, get_banned_authors, get_trading_config, get_pending_trades, get_pending_sigma_trades, update_trade_bought, update_trade_failed, get_pending_sells, update_sell_executed, update_sell_failed" }),

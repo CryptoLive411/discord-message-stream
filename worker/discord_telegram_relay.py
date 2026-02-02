@@ -284,6 +284,31 @@ class APIClient:
             logger.error(f"Failed to update sell as failed: {e}")
             return False
     
+    async def queue_trade_ca(self, token_address: str, chain: str, channel_id: str, 
+                             channel_name: str, channel_category: str, author: str,
+                             message_preview: str) -> bool:
+        """Queue a detected CA for trading. Categories: under-100k, memecoin-chat, memecoin-alpha, other"""
+        try:
+            response = await self.client.post(
+                f"{self.base_url}/worker-pull",
+                params={"action": "queue_trade_ca"},
+                headers=self.headers,
+                json={
+                    "token_address": token_address,
+                    "chain": chain,
+                    "channel_id": channel_id,
+                    "channel_name": channel_name,
+                    "channel_category": channel_category,
+                    "author": author,
+                    "message_preview": message_preview
+                }
+            )
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to queue trade CA: {e}")
+            return False
+    
     async def get_open_positions(self) -> list[dict]:
         """Fetch open positions for monitoring."""
         try:
@@ -1007,9 +1032,69 @@ class ChannelTab:
             # Notify main relay
             if self.on_message_callback:
                 await self.on_message_callback(self.channel_id, msg)
+            
+            # CA DETECTION: Check for Solana/Base contract addresses and write to trades table
+            await self._detect_and_queue_ca(raw_text, author)
                 
         except Exception as e:
             logger.error(f"[{self.channel_name}] Error handling message: {e}")
+    
+    async def _detect_and_queue_ca(self, text: str, author: str):
+        """Detect contract addresses in message and queue for trading."""
+        if not text:
+            return
+        
+        import re
+        
+        # Solana CA pattern (base58, 32-44 chars)
+        SOLANA_CA_REGEX = r'[1-9A-HJ-NP-Za-km-z]{32,44}'
+        # EVM CA pattern (0x + 40 hex chars)
+        EVM_CA_REGEX = r'0x[a-fA-F0-9]{40}'
+        
+        # Known addresses to skip
+        SKIP_ADDRESSES = {
+            'So11111111111111111111111111111111111111112',  # Wrapped SOL
+            '11111111111111111111111111111111',  # System Program
+            'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',  # Token Program
+        }
+        
+        # Determine channel category based on channel name
+        channel_lower = self.channel_name.lower()
+        if 'under' in channel_lower and '100k' in channel_lower:
+            channel_category = 'under-100k'
+        elif 'alpha' in channel_lower:
+            channel_category = 'memecoin-alpha'
+        elif 'memecoin' in channel_lower:
+            channel_category = 'memecoin-chat'
+        else:
+            channel_category = 'other'
+        
+        detected_cas = []
+        
+        # Find Solana addresses
+        for match in re.findall(SOLANA_CA_REGEX, text):
+            if match not in SKIP_ADDRESSES and len(match) >= 32:
+                detected_cas.append({'address': match, 'chain': 'solana'})
+        
+        # Find EVM addresses
+        for match in re.findall(EVM_CA_REGEX, text):
+            detected_cas.append({'address': match.lower(), 'chain': 'base'})
+        
+        # Queue each detected CA for trading
+        for ca in detected_cas:
+            try:
+                await self.api.queue_trade_ca(
+                    token_address=ca['address'],
+                    chain=ca['chain'],
+                    channel_id=self.channel_id,
+                    channel_name=self.channel_name,
+                    channel_category=channel_category,
+                    author=author,
+                    message_preview=text[:200]
+                )
+                logger.info(f"[{self.channel_name}] 🎯 CA detected ({ca['chain']}): {ca['address'][:15]}... -> {channel_category}")
+            except Exception as e:
+                logger.error(f"[{self.channel_name}] Failed to queue CA: {e}")
     
     async def start(self):
         """Open tab and start watching the channel."""
