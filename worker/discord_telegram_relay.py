@@ -328,78 +328,6 @@ class APIClient:
         except Exception as e:
             logger.error(f"Failed to fetch open positions: {e}")
             return []
-
-# ============================================================================
-# Bot Commander Client (for Lovable dashboard integration)
-# ============================================================================
-
-class BotCommanderClient:
-    """Client for sending CA detections to Bot Commander Supabase."""
-    
-    def __init__(self, config: Config):
-        self.config = config
-        self.enabled = bool(config.bot_commander_url and config.bot_commander_api_key)
-        if self.enabled:
-            self.base_url = config.bot_commander_url
-            self.headers = {
-                "apikey": config.bot_commander_api_key,
-                "Authorization": f"Bearer {config.bot_commander_api_key}",
-                "Content-Type": "application/json"
-            }
-            self.client = httpx.AsyncClient(timeout=30.0)
-            logger.info(f"Bot Commander integration enabled: {self.base_url}")
-        else:
-            logger.info("Bot Commander integration disabled (no BOT_COMMANDER_URL/BOT_COMMANDER_API_KEY)")
-    
-    async def queue_trade(self, token_address: str, chain: str, channel_id: str,
-                          channel_name: str, channel_category: str, author: str,
-                          message_preview: str, allocation_sol: float = 0.05) -> bool:
-        """Queue a detected CA for trading in Bot Commander."""
-        if not self.enabled:
-            return False
-        
-        try:
-            # Map channel categories to Bot Commander enum values
-            category_map = {
-                'memecoin-alpha': 'alpha_calls',
-                'memecoin-chat': 'degen_plays',
-                'under-100k': 'insider_alerts',
-                'other': 'custom'
-            }
-            bc_category = category_map.get(channel_category, 'custom')
-            
-            # Insert directly into trades table via REST API
-            trade_data = {
-                "contract_address": token_address,
-                "chain": chain,
-                "channel_id": channel_id,
-                "channel_category": bc_category,
-                "allocation_sol": allocation_sol,
-                "status": "pending_sigma",
-                "source_message": f"[{channel_name}] {author}: {message_preview[:200]}"
-            }
-            
-            response = await self.client.post(
-                f"{self.base_url}/rest/v1/trades",
-                headers=self.headers,
-                json=trade_data
-            )
-            
-            if response.status_code in [200, 201]:
-                logger.info(f"[BotCommander] ✅ Queued trade: {token_address[:15]}... ({chain}) -> {bc_category}")
-                return True
-            else:
-                logger.error(f"[BotCommander] Failed to queue trade: {response.status_code} {response.text}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"[BotCommander] Error queuing trade: {e}")
-            return False
-    
-    async def close(self):
-        """Close the HTTP client."""
-        if self.enabled:
-            await self.client.aclose()
     
     async def update_position_price(self, trade_id: str, current_price: float, current_value_sol: float = None, highest_price: float = None) -> Optional[dict]:
         """Update position price, highest price for trailing stop, and check for auto-sell triggers."""
@@ -612,6 +540,78 @@ class BotCommanderClient:
     async def close(self):
         """Close the HTTP client."""
         await self.client.aclose()
+
+# ============================================================================
+# Bot Commander Client (for Lovable dashboard integration)
+# ============================================================================
+
+class BotCommanderClient:
+    """Client for sending CA detections to Bot Commander Supabase."""
+    
+    def __init__(self, config: Config):
+        self.config = config
+        self.enabled = bool(config.bot_commander_url and config.bot_commander_api_key)
+        if self.enabled:
+            self.base_url = config.bot_commander_url
+            self.headers = {
+                "apikey": config.bot_commander_api_key,
+                "Authorization": f"Bearer {config.bot_commander_api_key}",
+                "Content-Type": "application/json"
+            }
+            self.client = httpx.AsyncClient(timeout=30.0)
+            logger.info(f"Bot Commander integration enabled: {self.base_url}")
+        else:
+            logger.info("Bot Commander integration disabled (no BOT_COMMANDER_URL/BOT_COMMANDER_API_KEY)")
+    
+    async def queue_trade(self, token_address: str, chain: str, channel_id: str,
+                          channel_name: str, channel_category: str, author: str,
+                          message_preview: str, allocation_sol: float = 0.05) -> bool:
+        """Queue a detected CA for trading in Bot Commander."""
+        if not self.enabled:
+            return False
+        
+        try:
+            # Map channel categories to Bot Commander enum values
+            category_map = {
+                'memecoin-alpha': 'alpha_calls',
+                'memecoin-chat': 'degen_plays',
+                'under-100k': 'insider_alerts',
+                'other': 'custom'
+            }
+            bc_category = category_map.get(channel_category, 'custom')
+            
+            # Insert directly into trades table via REST API
+            trade_data = {
+                "contract_address": token_address,
+                "chain": chain,
+                "channel_id": channel_id,
+                "channel_category": bc_category,
+                "allocation_sol": allocation_sol,
+                "status": "pending_sigma",
+                "source_message": f"[{channel_name}] {author}: {message_preview[:200]}"
+            }
+            
+            response = await self.client.post(
+                f"{self.base_url}/rest/v1/trades",
+                headers=self.headers,
+                json=trade_data
+            )
+            
+            if response.status_code in [200, 201]:
+                logger.info(f"[BotCommander] ✅ Queued trade: {token_address[:15]}... ({chain}) -> {bc_category}")
+                return True
+            else:
+                logger.error(f"[BotCommander] Failed to queue trade: {response.status_code} {response.text}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"[BotCommander] Error queuing trade: {e}")
+            return False
+    
+    async def close(self):
+        """Close the HTTP client."""
+        if self.enabled:
+            await self.client.aclose()
 
 # ============================================================================
 # Channel Tab Manager (MutationObserver-based real-time detection)
