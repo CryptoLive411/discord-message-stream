@@ -60,6 +60,9 @@ class Config:
     channel_refresh_interval: int = 60  # seconds between checking for new/removed channels
     headless: bool = True   # Run browser in headless mode
     browser_profile_path: str = "./discord_profile"
+    # Bot Commander integration (optional)
+    bot_commander_url: str = None
+    bot_commander_api_key: str = None
     
     @classmethod
     def from_env(cls) -> 'Config':
@@ -78,6 +81,8 @@ class Config:
             channel_refresh_interval=int(os.getenv('CHANNEL_REFRESH_INTERVAL', '60')),
             headless=os.getenv('HEADLESS', 'true').lower() == 'true',
             browser_profile_path=os.getenv('BROWSER_PROFILE_PATH', './discord_profile'),
+            bot_commander_url=os.getenv('BOT_COMMANDER_URL'),
+            bot_commander_api_key=os.getenv('BOT_COMMANDER_API_KEY'),
         )
 
 # ============================================================================
@@ -323,6 +328,78 @@ class APIClient:
         except Exception as e:
             logger.error(f"Failed to fetch open positions: {e}")
             return []
+
+# ============================================================================
+# Bot Commander Client (for Lovable dashboard integration)
+# ============================================================================
+
+class BotCommanderClient:
+    """Client for sending CA detections to Bot Commander Supabase."""
+    
+    def __init__(self, config: Config):
+        self.config = config
+        self.enabled = bool(config.bot_commander_url and config.bot_commander_api_key)
+        if self.enabled:
+            self.base_url = config.bot_commander_url
+            self.headers = {
+                "apikey": config.bot_commander_api_key,
+                "Authorization": f"Bearer {config.bot_commander_api_key}",
+                "Content-Type": "application/json"
+            }
+            self.client = httpx.AsyncClient(timeout=30.0)
+            logger.info(f"Bot Commander integration enabled: {self.base_url}")
+        else:
+            logger.info("Bot Commander integration disabled (no BOT_COMMANDER_URL/BOT_COMMANDER_API_KEY)")
+    
+    async def queue_trade(self, token_address: str, chain: str, channel_id: str,
+                          channel_name: str, channel_category: str, author: str,
+                          message_preview: str, allocation_sol: float = 0.05) -> bool:
+        """Queue a detected CA for trading in Bot Commander."""
+        if not self.enabled:
+            return False
+        
+        try:
+            # Map channel categories to Bot Commander enum values
+            category_map = {
+                'memecoin-alpha': 'alpha_calls',
+                'memecoin-chat': 'degen_plays',
+                'under-100k': 'insider_alerts',
+                'other': 'custom'
+            }
+            bc_category = category_map.get(channel_category, 'custom')
+            
+            # Insert directly into trades table via REST API
+            trade_data = {
+                "contract_address": token_address,
+                "chain": chain,
+                "channel_id": channel_id,
+                "channel_category": bc_category,
+                "allocation_sol": allocation_sol,
+                "status": "pending_sigma",
+                "source_message": f"[{channel_name}] {author}: {message_preview[:200]}"
+            }
+            
+            response = await self.client.post(
+                f"{self.base_url}/rest/v1/trades",
+                headers=self.headers,
+                json=trade_data
+            )
+            
+            if response.status_code in [200, 201]:
+                logger.info(f"[BotCommander] ✅ Queued trade: {token_address[:15]}... ({chain}) -> {bc_category}")
+                return True
+            else:
+                logger.error(f"[BotCommander] Failed to queue trade: {response.status_code} {response.text}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"[BotCommander] Error queuing trade: {e}")
+            return False
+    
+    async def close(self):
+        """Close the HTTP client."""
+        if self.enabled:
+            await self.client.aclose()
     
     async def update_position_price(self, trade_id: str, current_price: float, current_value_sol: float = None, highest_price: float = None) -> Optional[dict]:
         """Update position price, highest price for trailing stop, and check for auto-sell triggers."""
@@ -954,13 +1031,14 @@ class ChannelTab:
     })();
     """
     
-    def __init__(self, channel: dict, context: BrowserContext, api: APIClient, on_message_callback, get_banned_authors_func, telegram_sender=None):
+    def __init__(self, channel: dict, context: BrowserContext, api: APIClient, on_message_callback, get_banned_authors_func, telegram_sender=None, bot_commander=None):
         self.channel = channel
         self.context = context
         self.api = api
         self.on_message_callback = on_message_callback
         self.get_banned_authors = get_banned_authors_func    # Function to get current blacklist
         self.telegram_sender = telegram_sender  # Direct Telegram sender for fast sending
+        self.bot_commander = bot_commander  # Bot Commander client for Lovable dashboard
         self.page: Optional[Page] = None
         self.running = False
         # Extract Discord channel ID from URL (last segment)
@@ -1087,6 +1165,7 @@ class ChannelTab:
         # Queue each detected CA for trading
         for ca in detected_cas:
             try:
+                # Send to original Supabase (discord-message-stream)
                 await self.api.queue_trade_ca(
                     token_address=ca['address'],
                     chain=ca['chain'],
@@ -1097,6 +1176,18 @@ class ChannelTab:
                     message_preview=text[:200]
                 )
                 logger.info(f"[{self.channel_name}] 🎯 CA detected ({ca['chain']}): {ca['address'][:15]}... -> {channel_category}")
+                
+                # Also send to Bot Commander (Lovable dashboard) if enabled
+                if self.bot_commander and self.bot_commander.enabled:
+                    await self.bot_commander.queue_trade(
+                        token_address=ca['address'],
+                        chain=ca['chain'],
+                        channel_id=self.channel_id,
+                        channel_name=self.channel_name,
+                        channel_category=channel_category,
+                        author=author,
+                        message_preview=text[:200]
+                    )
             except Exception as e:
                 logger.error(f"[{self.channel_name}] Failed to queue CA: {e}")
     
@@ -1198,10 +1289,11 @@ class ChannelTab:
 class DiscordWatcher:
     """Watches Discord channels using parallel tabs with MutationObserver."""
     
-    def __init__(self, config: Config, api: APIClient, telegram_sender=None):
+    def __init__(self, config: Config, api: APIClient, telegram_sender=None, bot_commander=None):
         self.config = config
         self.api = api
         self.telegram_sender = telegram_sender  # Direct Telegram sender for fast path
+        self.bot_commander = bot_commander  # Bot Commander client for Lovable dashboard
         self.context: Optional[BrowserContext] = None
         self.tabs: dict[str, ChannelTab] = {}  # channel_id -> ChannelTab
         self.running = False
@@ -1275,7 +1367,7 @@ class DiscordWatcher:
         new_channels = [(cid, channel) for cid, channel in enabled_channels.items() if cid not in self.tabs]
         for i, (cid, channel) in enumerate(new_channels):
             logger.info(f"Opening tab for new channel: {channel['name']}")
-            tab = ChannelTab(channel, self.context, self.api, self._on_message, self._get_banned_authors, self.telegram_sender)
+            tab = ChannelTab(channel, self.context, self.api, self._on_message, self._get_banned_authors, self.telegram_sender, self.bot_commander)
             self.tabs[cid] = tab
             # Start tab in background with staggered delay
             asyncio.create_task(self._start_tab_with_delay(tab, i * 0.5))
@@ -1561,9 +1653,10 @@ class DiscordTelegramRelay:
     def __init__(self):
         self.config = Config.from_env()
         self.api = APIClient(self.config)
+        self.bot_commander = BotCommanderClient(self.config)  # Bot Commander for Lovable dashboard
         self.telegram_sender = TelegramSender(self.config, self.api)
-        # Pass telegram_sender to DiscordWatcher for direct fast sending
-        self.discord_watcher = DiscordWatcher(self.config, self.api, self.telegram_sender)
+        # Pass telegram_sender and bot_commander to DiscordWatcher for direct fast sending
+        self.discord_watcher = DiscordWatcher(self.config, self.api, self.telegram_sender, self.bot_commander)
         self.running = False
     
     async def start(self):
