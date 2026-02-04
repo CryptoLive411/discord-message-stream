@@ -1041,10 +1041,13 @@ class ChannelTab:
         self.bot_commander = bot_commander  # Bot Commander client for Lovable dashboard
         self.page: Optional[Page] = None
         self.running = False
-        # Extract Discord channel ID from URL (last segment)
-        # URL format: https://discord.com/channels/SERVER_ID/CHANNEL_ID
+        # Store both IDs:
+        # - supabase_id: UUID from database (for topic lookup)
+        # - discord_channel_id: Discord's channel ID from URL (for CA tracking)
+        self.supabase_id = channel['id']  # UUID for database lookups
         url_parts = channel['url'].rstrip('/').split('/')
-        self.channel_id = url_parts[-1] if url_parts else channel['id']
+        self.discord_channel_id = url_parts[-1] if url_parts else channel['id']
+        self.channel_id = self.supabase_id  # Use Supabase UUID for Telegram topic lookup
         self.channel_name = channel['name']
         self.channel_url = channel['url']
     
@@ -1084,7 +1087,8 @@ class ChannelTab:
                         text=raw_text,
                         channel_name=self.channel_name,
                         channel_id=self.channel_id,
-                        attachments=msg.get('attachments', [])
+                        attachments=msg.get('attachments', []),
+                        author=author
                     )
                     logger.info(f"[{self.channel_name}] ⚡ FAST sent to Telegram")
                 except Exception as e:
@@ -1149,7 +1153,7 @@ class ChannelTab:
             '1432404864008327200': 'under-100k',
             '1250836631649386496': 'memecoin-alpha',
         }
-        channel_category = CHANNEL_CATEGORIES.get(self.channel_id, 'other')
+        channel_category = CHANNEL_CATEGORIES.get(self.discord_channel_id, 'other')
         
         detected_cas = []
         
@@ -1503,7 +1507,7 @@ class TelegramSender:
             logger.error(f"Failed to resolve Telegram destination: {e}")
             return None
     
-    async def send_direct(self, text: str, channel_name: str, channel_id: str, attachments: list = None):
+    async def send_direct(self, text: str, channel_name: str, channel_id: str, attachments: list = None, author: str = None):
         """Send a message directly to Telegram (fast path, no queue)."""
         if not self.running or not self.client:
             raise Exception("Telegram sender not running")
@@ -1525,11 +1529,16 @@ class TelegramSender:
             if channel and channel.get('telegram_topic_id'):
                 reply_to = int(channel['telegram_topic_id'])
         
+        # Format message with author for PNL tracking
+        formatted_text = text.strip() if text else ''
+        if author and formatted_text:
+            formatted_text = f"👤 {author}:\n{formatted_text}"
+        
         # Send text message
-        if text and text.strip():
+        if formatted_text:
             await self.client.send_message(
                 dest['entity'],
-                text.strip(),
+                formatted_text,
                 reply_to=reply_to,
                 parse_mode=None
             )
@@ -1547,8 +1556,14 @@ class TelegramSender:
                     logger.warning(f"Failed to send attachment: {e}")
     
     async def _format_message(self, msg: dict, channel_name: str) -> str:
-        """Format a message for Telegram - text only, no username."""
-        return (msg.get('message_text') or '').strip()
+        """Format a message for Telegram - include author for PNL tracking."""
+        author = msg.get('author_name', '').strip()
+        text = (msg.get('message_text') or '').strip()
+        if author and text:
+            return f"👤 {author}:\n{text}"
+        elif text:
+            return text
+        return ''
     
     # Note: Sigma Bot trading has been removed. All trading is now done via Jupiter direct.
     
