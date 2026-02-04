@@ -1056,6 +1056,73 @@ class ChannelTab:
         content = f"{self.channel_id}:{message_id}"
         return hashlib.sha256(content.encode()).hexdigest()[:32]
     
+    def _is_trading_relevant(self, text: str, attachments: list) -> bool:
+        """Check if message is trading-relevant (CA, call, alert) vs chatter."""
+        if not text and not attachments:
+            return False
+        
+        text_lower = (text or '').lower()
+        
+        # Always forward if contains a contract address (Solana or EVM)
+        # Solana: 32-44 base58 chars
+        if re.search(r'[1-9A-HJ-NP-Za-km-z]{32,44}', text or ''):
+            return True
+        # EVM: 0x + 40 hex chars
+        if re.search(r'0x[a-fA-F0-9]{40}', text or ''):
+            return True
+        
+        # Trading keywords that indicate a call/alert
+        TRADING_KEYWORDS = [
+            # Call indicators
+            'buy', 'sell', 'long', 'short', 'entry', 'exit',
+            'tp', 'sl', 'take profit', 'stop loss', 'target',
+            'dip', 'pump', 'dump', 'moon', 'ape', 'aped',
+            # Token/chart references
+            'ca:', 'ca ', 'contract:', 'token:', 'pair:',
+            'dexscreener', 'birdeye', 'dextools', 'solscan',
+            'raydium', 'jupiter', 'uniswap', 'pancakeswap',
+            # Price/market indicators
+            'mcap', 'market cap', 'liquidity', 'liq', 'volume',
+            'ath', 'atl', 'support', 'resistance',
+            '$', 'sol', 'eth', 'btc', 'usdt', 'usdc',
+            # Alert words
+            'alert', 'signal', 'call', 'gem', 'alpha',
+            'snipe', 'sniped', 'launch', 'launched', 'presale',
+            '100x', '10x', '50x', '1000x', 'x potential',
+            # Chart patterns
+            'chart', 'candle', 'breakout', 'breakdown',
+            'bullish', 'bearish', 'reversal',
+        ]
+        
+        for keyword in TRADING_KEYWORDS:
+            if keyword in text_lower:
+                return True
+        
+        # Forward if has image attachments (often charts/screenshots)
+        if attachments:
+            return True
+        
+        # Skip short messages without keywords (likely chatter)
+        if len(text or '') < 20:
+            return False
+        
+        # Skip common chatter patterns
+        CHATTER_PATTERNS = [
+            r'^(gm|gn|good morning|good night|hey|hi|hello|sup|yo)\b',
+            r'^(lol|lmao|haha|nice|cool|wow|damn|bruh|bro)\b',
+            r'^(thanks|thank you|ty|thx|np|no problem)\b',
+            r'^(yes|no|yeah|yep|nope|maybe|idk|ok|okay)\b',
+            r'^\?+$',  # Just question marks
+            r'^!+$',   # Just exclamation marks
+        ]
+        
+        for pattern in CHATTER_PATTERNS:
+            if re.match(pattern, text_lower):
+                return False
+        
+        # Default: forward longer messages that might contain alpha
+        return len(text or '') > 50
+    
     async def _handle_new_message(self, message_json: str):
         """Callback when MutationObserver detects a new message."""
         try:
@@ -1077,6 +1144,11 @@ class ChannelTab:
             raw_text = (msg.get('content') or '').strip()
             if author and raw_text:
                 raw_text = re.sub(rf'^\s*{re.escape(author)}\s*:\s*', '', raw_text).strip()
+            
+            # FILTER: Only forward trading-relevant messages (CAs, calls, alerts)
+            if not self._is_trading_relevant(raw_text, msg.get('attachments', [])):
+                logger.debug(f"[{self.channel_name}] Skipping chatter from {author}: {raw_text[:30] if raw_text else '[empty]'}...")
+                return
             
             logger.info(f"[{self.channel_name}] New message from {author}: {raw_text[:50] if raw_text else '[attachment]'}...")
             
